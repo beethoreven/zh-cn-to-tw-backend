@@ -1,5 +1,12 @@
 """
-Gemini/Claude 呼叫使用量記錄，存在 SQLite（usage.db，跟這支程式同一個 repo 根目錄）。
+Gemini/Claude 呼叫使用量記錄。
+
+預設存在本機 SQLite（usage.db，跟這支程式同一個 repo 根目錄），適合本機
+開發。但 Render 免費方案的檔案系統是非持久性的——沒有掛付費 Disk 的話，
+每次重新部署本機檔案都會被清空，SQLite 檔案沒辦法跨部署存活。所以正式
+環境改用 Neon（免費、永久不過期的 Postgres）：只要有設定 DATABASE_URL
+這個環境變數，就會改連 Postgres；沒設定（本機開發預設）就照舊用 SQLite，
+兩邊程式碼共用，只有連線/建表那幾行語法不同，查詢邏輯完全一樣。
 
 用「事件日誌」設計（每次呼叫一筆紀錄，含時間戳），不用「每日累加」的
 彙總表，原因：
@@ -30,6 +37,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _DB_PATH = Path(__file__).resolve().parent.parent / "usage.db"
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+_USE_POSTGRES = bool(_DATABASE_URL)
 _RESET_TZ = ZoneInfo("America/Los_Angeles")
 _TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 _UTC = ZoneInfo("UTC")
@@ -43,9 +52,44 @@ _lock = threading.Lock()
 _BILLING_CYCLE_START_DAY = int(os.environ.get("USAGE_BILLING_CYCLE_START_DAY", "1"))
 
 
-def _get_conn() -> sqlite3.Connection:
+def _sql(query: str) -> str:
+    """SQLite 用 `?` 佔位符寫查詢語法(單一事實來源)，這裡在 Postgres 模式
+    下轉成 `%s`，避免每條查詢都要維護兩份幾乎一樣的字串。"""
+    return query.replace("?", "%s") if _USE_POSTGRES else query
+
+
+def _get_conn():
+    """回傳 (conn, cur)。SQLite 模式下 conn 跟 cur 是同一個物件(sqlite3.Connection
+    本身就有 execute());Postgres 模式下是分開的 conn/cursor，呼叫端一律用
+    cur.execute(...) 查詢、conn.commit()/conn.close() 管理連線，兩種模式都適用。"""
+    if _USE_POSTGRES:
+        import psycopg2
+
+        conn = psycopg2.connect(_DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id SERIAL PRIMARY KEY,
+                timestamp_utc TEXT NOT NULL,
+                model TEXT NOT NULL,
+                user_email TEXT
+            )
+            """
+        )
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_log'")
+        existing_columns = {row[0] for row in cur.fetchall()}
+        for column in ("input_tokens", "output_tokens", "file_name"):
+            col_type = "TEXT" if column == "file_name" else "INTEGER"
+            if column not in existing_columns:
+                cur.execute(f"ALTER TABLE usage_log ADD COLUMN {column} {col_type}")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)")
+        conn.commit()
+        return conn, cur
+
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,17 +99,17 @@ def _get_conn() -> sqlite3.Connection:
         )
         """
     )
-    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_log)")}
+    existing_columns = {row[1] for row in cur.execute("PRAGMA table_info(usage_log)")}
     if "input_tokens" not in existing_columns:
-        conn.execute("ALTER TABLE usage_log ADD COLUMN input_tokens INTEGER")
+        cur.execute("ALTER TABLE usage_log ADD COLUMN input_tokens INTEGER")
     if "output_tokens" not in existing_columns:
-        conn.execute("ALTER TABLE usage_log ADD COLUMN output_tokens INTEGER")
+        cur.execute("ALTER TABLE usage_log ADD COLUMN output_tokens INTEGER")
     if "file_name" not in existing_columns:
-        conn.execute("ALTER TABLE usage_log ADD COLUMN file_name TEXT")
-    conn.execute(
+        cur.execute("ALTER TABLE usage_log ADD COLUMN file_name TEXT")
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)"
     )
-    return conn
+    return conn, cur
 
 
 def record_usage(
@@ -76,12 +120,14 @@ def record_usage(
     file_name: str | None = None,
 ) -> None:
     with _lock:
-        conn = _get_conn()
+        conn, cur = _get_conn()
         try:
-            conn.execute(
-                "INSERT INTO usage_log "
-                "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+            cur.execute(
+                _sql(
+                    "INSERT INTO usage_log "
+                    "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"
+                ),
                 (
                     datetime.now(_UTC).isoformat(),
                     model,
@@ -105,11 +151,13 @@ def get_today_usage(model: str) -> int:
     end_utc = end_local.astimezone(_UTC).isoformat()
 
     with _lock:
-        conn = _get_conn()
+        conn, cur = _get_conn()
         try:
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM usage_log "
-                "WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?",
+            cur.execute(
+                _sql(
+                    "SELECT COUNT(*) FROM usage_log "
+                    "WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
+                ),
                 (model, start_utc, end_utc),
             )
             return cur.fetchone()[0]
@@ -155,11 +203,13 @@ def get_month_token_usage(model: str) -> dict:
     end_utc = end_local.astimezone(_UTC).isoformat()
 
     with _lock:
-        conn = _get_conn()
+        conn, cur = _get_conn()
         try:
-            cur = conn.execute(
-                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-                "FROM usage_log WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?",
+            cur.execute(
+                _sql(
+                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
+                    "FROM usage_log WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
+                ),
                 (model, start_utc, end_utc),
             )
             input_tokens, output_tokens = cur.fetchone()
