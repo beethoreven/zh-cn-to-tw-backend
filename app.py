@@ -273,6 +273,7 @@ def create_job():
             ),
             "file_name": file.filename,
             "detect_cover": _parse_bool(request.form.get("detect_cover"), config.COVER_DETECT_DEFAULT),
+            "user_email": request.user_email,
         }
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -435,6 +436,10 @@ def _parse_review_settings(form):
             config.MAX_RETRY_MAX,
             "max_retry",
         ),
+        # request 是 Flask 的 context-local proxy，這支函式只會在
+        # request-handling 的路由裡被呼叫，直接拿 request.user_email
+        # 是安全的（require_auth 裝飾器已經驗證過並存進去）
+        "user_email": request.user_email,
     }
 
 
