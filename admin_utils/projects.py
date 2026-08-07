@@ -18,6 +18,18 @@ def list_projects() -> list[dict]:
             conn.close()
 
 
+def list_projects_by_owner(owner_id: int) -> list[dict]:
+    """列出某個使用者名下的專案，給主介面「本案處理劇本」下拉選單用
+    （不限管理員——一般使用者查詢自己負責的專案）。"""
+    with LOCK:
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(sql("SELECT id, name FROM projects WHERE owner = ? ORDER BY id"), (owner_id,))
+            return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_project(project_id: int) -> dict | None:
     with LOCK:
         conn, cur = get_ready_conn()

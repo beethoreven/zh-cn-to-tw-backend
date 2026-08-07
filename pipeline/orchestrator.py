@@ -52,6 +52,7 @@ def _refine_and_correct(
     max_retry: int,
     user_email,
     file_name: str | None,
+    project: int | None,
 ) -> str:
     """呼叫 LLM 潤飾並用 OpenCC 校正，回傳最終文字；絕不拋出例外，
     任何失敗都退回 traditional_text（純 OpenCC 結果）。"""
@@ -65,7 +66,9 @@ def _refine_and_correct(
             job_manager.append_log(
                 job_id, f"批次 {batch_no} 第 {attempt} 次呼叫 {model} 潤飾"
             )
-            refined = refine_fn(traditional_text, model=model, user_email=user_email, file_name=file_name)
+            refined = refine_fn(
+                traditional_text, model=model, user_email=user_email, file_name=file_name, project=project
+            )
             break
         except OutputTruncatedError as exc:
             # 同一份輸入重打一次還是會被截斷，重試沒有意義，直接跳出
@@ -133,6 +136,7 @@ def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
     dpi = settings.get("dpi", config.PDF_RENDER_DPI)
     user_email = settings.get("user_email")
     file_name = settings.get("file_name")
+    project = settings.get("project")
     detect_cover = settings.get("detect_cover", config.COVER_DETECT_DEFAULT)
 
     job_manager.set_status(job_id, "running")
@@ -208,7 +212,7 @@ def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
             try:
                 traditional_text = convert_to_traditional(raw_batch_text)
                 final_text = _refine_and_correct(
-                    job_id, batch_no, traditional_text, model, max_retry, user_email, file_name
+                    job_id, batch_no, traditional_text, model, max_retry, user_email, file_name, project
                 )
             except Exception as exc:  # noqa: BLE001
                 # 保底：這個批次不管在哪個環節出了非預期狀況，都不該讓

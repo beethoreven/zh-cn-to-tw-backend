@@ -17,9 +17,9 @@ Gemini/Claude 呼叫使用量記錄。
    統計」，不用改表結構、不用做資料遷移。
 
 「今天」（Gemini 用）採用官方文件講的額度重置時區——美西時間
-（America/Los_Angeles）；「本月」（Claude 用，Claude 沒有 Gemini 那種
-免費 RPD，這裡記的是 token 數/估計費用）用台灣時區的日曆月，比較貼近
-使用者自己看帳的直覺。都用 zoneinfo 處理，不必自己手動換算日光節約。
+（America/Los_Angeles）。Claude 沒有 Gemini 那種免費 RPD，這裡記的是
+token 數/估計費用，統計範圍是「整個專案累積至今」或「全站累積至今」，
+不分時間週期，都用 zoneinfo 處理「今天」這部分，不必自己手動換算日光節約。
 
 注意：這裡記的是「這個工具打了幾次/用了多少 token」，跟 Google/Anthropic
 官方帳務是兩回事——如果同一把 API key 也在別處使用，這裡的數字會跟
@@ -28,23 +28,13 @@ Gemini/Claude 呼叫使用量記錄。
 
 from __future__ import annotations
 
-import calendar
-import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from db_utils.connection import LOCK, get_ready_conn, sql
 
 _RESET_TZ = ZoneInfo("America/Los_Angeles")
-_TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 _UTC = ZoneInfo("UTC")
-
-# 「本月」（Claude 用量統計）的起算日，預設每月 1 號。這個跟 Anthropic
-# Console 帳單實際的計費週期不一定一樣（Console 帳號的計費週期要申請
-# 之後才看得到），先用日曆月當預設；之後知道實際週期是哪一天，改這個
-# 環境變數對齊即可，不用改程式碼。也完全跟 Claude Code/Claude.ai 的
-# 訂閱方案週期無關，那是另一套帳務系統。
-_BILLING_CYCLE_START_DAY = int(os.environ.get("USAGE_BILLING_CYCLE_START_DAY", "1"))
 
 
 def _sql(query: str) -> str:
@@ -110,52 +100,37 @@ def get_today_usage(model: str) -> int:
             conn.close()
 
 
-def _clamp_day(year: int, month: int, day: int) -> int:
-    last_day = calendar.monthrange(year, month)[1]
-    return min(day, last_day)
-
-
-def _cycle_boundaries(now_local: datetime, start_day: int) -> tuple[datetime, datetime]:
-    """算出 now_local 落在哪個計費週期，回傳 (週期起點, 下個週期起點)。
-    start_day 若超過當月天數（例如設 31 但該月只有 30 天）會自動夾到月底。"""
-    year, month = now_local.year, now_local.month
-    day = _clamp_day(year, month, start_day)
-    candidate_start = now_local.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
-
-    if now_local < candidate_start:
-        # 還沒到這個月的起算日，代表現在還在「上個月起算」的週期裡
-        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
-        day = _clamp_day(prev_year, prev_month, start_day)
-        start_local = candidate_start.replace(year=prev_year, month=prev_month, day=day)
-    else:
-        start_local = candidate_start
-
-    next_year, next_month = (
-        (start_local.year + 1, 1) if start_local.month == 12 else (start_local.year, start_local.month + 1)
-    )
-    next_day = _clamp_day(next_year, next_month, start_day)
-    end_local = start_local.replace(year=next_year, month=next_month, day=next_day)
-
-    return start_local, end_local
-
-
-def get_month_token_usage(model: str) -> dict:
-    """回傳「本月」（台灣時區，週期起算日可設定）這個 model 累積的
-    input/output token 數。"""
-    now_local = datetime.now(_TAIWAN_TZ)
-    start_local, end_local = _cycle_boundaries(now_local, _BILLING_CYCLE_START_DAY)
-    start_utc = start_local.astimezone(_UTC).isoformat()
-    end_utc = end_local.astimezone(_UTC).isoformat()
-
+def get_project_token_usage(project_id: int, model: str) -> dict:
+    """回傳某個劇本案（project id）累積至今、這個 model 的 input/output
+    token 數，不分時間範圍——給主介面「本案使用 Claude token 狀況」用。"""
     with LOCK:
         conn, cur = _get_conn()
         try:
             cur.execute(
                 _sql(
                     "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-                    "FROM usage_log WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
+                    "FROM usage_log WHERE model = ? AND project = ?"
                 ),
-                (model, start_utc, end_utc),
+                (model, project_id),
+            )
+            input_tokens, output_tokens = cur.fetchone()
+            return {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        finally:
+            conn.close()
+
+
+def get_total_token_usage(model: str) -> dict:
+    """回傳這個 model 從有紀錄以來累積的 input/output token 數，不分時間、
+    不分專案——給管理員介面的總使用量用。"""
+    with LOCK:
+        conn, cur = _get_conn()
+        try:
+            cur.execute(
+                _sql(
+                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
+                    "FROM usage_log WHERE model = ?"
+                ),
+                (model,),
             )
             input_tokens, output_tokens = cur.fetchone()
             return {"input_tokens": input_tokens, "output_tokens": output_tokens}

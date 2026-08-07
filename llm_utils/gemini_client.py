@@ -39,12 +39,13 @@ def _generate(
     user_email: str | None,
     response_mime_type: str | None = None,
     file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     client = _get_client()
     model_name = model or config.GEMINI_MODEL
 
     # 不論這次呼叫最後成功或失敗，都算「打了一次」，記錄下來當用量參考
-    record_usage(model_name, user_email=user_email, file_name=file_name)
+    record_usage(model_name, user_email=user_email, file_name=file_name, project=project)
 
     gen_config = types.GenerateContentConfig(response_mime_type=response_mime_type) if response_mime_type else None
     try:
@@ -80,15 +81,25 @@ def _generate(
 
 
 def refine_text(
-    text: str, model: str | None = None, user_email: str | None = None, file_name: str | None = None
+    text: str,
+    model: str | None = None,
+    user_email: str | None = None,
+    file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     prompt = REFINE_PROMPT.format(text=text)
-    return _generate(prompt, model, user_email, file_name=file_name)
+    return _generate(prompt, model, user_email, file_name=file_name, project=project)
 
 
 def review_text(
-    text: str, model: str | None = None, user_email: str | None = None, file_name: str | None = None
+    text: str,
+    model: str | None = None,
+    user_email: str | None = None,
+    file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     """Stage 2 校對：回傳 LLM 原始輸出（應為 JSON 陣列字串），由呼叫端解析。"""
     prompt = REVIEW_PROMPT.format(text=text)
-    return _generate(prompt, model, user_email, response_mime_type="application/json", file_name=file_name)
+    return _generate(
+        prompt, model, user_email, response_mime_type="application/json", file_name=file_name, project=project
+    )

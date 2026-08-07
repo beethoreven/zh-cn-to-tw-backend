@@ -84,6 +84,7 @@ def _call_review_with_retry(
     max_retry: int,
     user_email,
     file_name: str | None,
+    project: int | None,
 ) -> list[dict]:
     review_fn = claude_client.review_text if model.startswith("claude") else gemini_client.review_text
 
@@ -95,7 +96,9 @@ def _call_review_with_retry(
             review_manager.append_log(
                 review_id, f"批次 {batch_no} 第 {attempt} 次呼叫 {model} 校對"
             )
-            raw = review_fn(chunk_text, model=model, user_email=user_email, file_name=file_name)
+            raw = review_fn(
+                chunk_text, model=model, user_email=user_email, file_name=file_name, project=project
+            )
             break
         except OutputTruncatedError as exc:
             review_manager.append_log(review_id, f"批次 {batch_no} {exc}", level="warning")
@@ -150,6 +153,7 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
     max_retry = settings.get("max_retry", config.REVIEW_MAX_RETRY)
     user_email = settings.get("user_email")
     file_name = settings.get("file_name")
+    project = settings.get("project")
     # 上一輪（或更早幾輪）使用者明確不想套用的建議，這輪要濾掉，
     # 不要重複拿同樣被否決過的東西煩使用者
     exclude_fingerprints = {tuple(fp) for fp in settings.get("exclude_fingerprints", [])}
@@ -174,7 +178,7 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
             review_manager.append_log(review_id, f"處理批次 {batch_no}/{len(chunks)}")
             try:
                 findings = _call_review_with_retry(
-                    review_id, batch_no, chunk_text, model, max_retry, user_email, file_name
+                    review_id, batch_no, chunk_text, model, max_retry, user_email, file_name, project
                 )
             except Exception as exc:  # noqa: BLE001
                 # 保底：這一批不管出了什麼非預期狀況，都只讓這批沒有結果，

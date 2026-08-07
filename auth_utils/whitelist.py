@@ -79,3 +79,19 @@ def is_admin_user(email: str | None) -> bool:
     """檢查這個 email 對應的角色是不是管理員，且帳號本身是啟用中。"""
     info = get_user_auth_info(email)
     return info is not None and info["active"] and info["is_admin"]
+
+
+def get_user_id(email: str | None) -> int | None:
+    """查出這個 email 對應的 users.id，給「本案處理劇本」下拉選單查詢
+    自己名下專案用。呼叫頻率低（每次登入後才查一次），不像
+    get_user_auth_info 那樣需要 TTL 快取。"""
+    if not email:
+        return None
+    with LOCK:
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(sql("SELECT id FROM users WHERE email = ?"), (email,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()

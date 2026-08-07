@@ -35,7 +35,11 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def _generate(
-    prompt: str, model: str | None, user_email: str | None, file_name: str | None = None
+    prompt: str,
+    model: str | None,
+    user_email: str | None,
+    file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     client = _get_client()
     model_name = model or "claude-haiku-4-5-20251001"
@@ -53,6 +57,7 @@ def _generate(
         input_tokens=getattr(usage, "input_tokens", None) if usage else None,
         output_tokens=getattr(usage, "output_tokens", None) if usage else None,
         file_name=file_name,
+        project=project,
     )
 
     if response.stop_reason == "max_tokens":
@@ -65,15 +70,23 @@ def _generate(
 
 
 def refine_text(
-    text: str, model: str | None = None, user_email: str | None = None, file_name: str | None = None
+    text: str,
+    model: str | None = None,
+    user_email: str | None = None,
+    file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     prompt = REFINE_PROMPT.format(text=text)
-    return _generate(prompt, model, user_email, file_name=file_name)
+    return _generate(prompt, model, user_email, file_name=file_name, project=project)
 
 
 def review_text(
-    text: str, model: str | None = None, user_email: str | None = None, file_name: str | None = None
+    text: str,
+    model: str | None = None,
+    user_email: str | None = None,
+    file_name: str | None = None,
+    project: int | None = None,
 ) -> str:
     """Stage 2 校對：回傳 Claude 原始輸出（應為 JSON 陣列字串），由呼叫端解析。"""
     prompt = REVIEW_PROMPT.format(text=text)
-    return _generate(prompt, model, user_email, file_name=file_name)
+    return _generate(prompt, model, user_email, file_name=file_name, project=project)

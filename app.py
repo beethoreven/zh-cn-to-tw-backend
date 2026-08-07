@@ -21,7 +21,7 @@ from pipeline.orchestrator import run_pipeline
 from review import review_manager
 from review.reviewer import run_review
 from usage.fx_rate import get_usd_twd_rate
-from usage.usage_log import get_month_token_usage, get_today_usage
+from usage.usage_log import get_project_token_usage, get_today_usage, get_total_token_usage
 
 app = Flask(__name__)
 
@@ -200,10 +200,9 @@ def get_usage():
     )
 
 
-@app.get("/api/usage/monthly")
-@require_auth
-def get_monthly_usage():
-    """回傳 Claude 系列 model 本月（台灣時區日曆月）的 token 用量與估計台幣費用。
+def _claude_usage_response(usage_by_model_fn) -> dict:
+    """共用邏輯：把「查出來的 token 數」轉成 {model: {tokens, usd_cost, twd_cost}}
+    的回應格式。usage_by_model_fn(model) 要回傳 {"input_tokens":.., "output_tokens":..}。
 
     費用是本工具自己記的 token 數乘上目前查到的官方牌價換算出來的參考值，
     不是去查 Anthropic 帳戶的真實帳單金額。
@@ -211,7 +210,7 @@ def get_monthly_usage():
     twd_rate = get_usd_twd_rate()
     result = {}
     for model, pricing in config.CLAUDE_PRICING.items():
-        usage = get_month_token_usage(model)
+        usage = usage_by_model_fn(model)
         usd_cost = (
             usage["input_tokens"] / 1_000_000 * pricing["input"]
             + usage["output_tokens"] / 1_000_000 * pricing["output"]
@@ -222,7 +221,25 @@ def get_monthly_usage():
             "usd_cost": round(usd_cost, 4),
             "twd_cost": round(usd_cost * twd_rate, 2),
         }
-    return jsonify({"models": result, "usd_twd_rate": twd_rate})
+    return {"models": result, "usd_twd_rate": twd_rate}
+
+
+@app.get("/api/usage/project/<int:project_id>")
+@require_auth
+def get_project_usage(project_id):
+    """回傳這個劇本案累積至今的 Claude token 用量與估計台幣費用，
+    給主介面「本案使用 Claude token 狀況」用。"""
+    return jsonify(_claude_usage_response(lambda model: get_project_token_usage(project_id, model)))
+
+
+@app.get("/api/my-projects")
+@require_auth
+def get_my_projects():
+    """給主介面「本案處理劇本」下拉選單用：只列出目前登入者自己名下的專案。"""
+    user_id = whitelist.get_user_id(request.user_email)
+    if user_id is None:
+        return jsonify({"projects": []})
+    return jsonify({"projects": admin_projects.list_projects_by_owner(user_id)})
 
 
 def _parse_whole_or_bounded_int(raw_value, default, lo, hi, field_name):
@@ -272,6 +289,16 @@ def _parse_bool(raw_value, default: bool) -> bool:
     return raw_value.lower() in ("true", "1", "on")
 
 
+def _require_project_id(raw_value) -> int:
+    """每次呼叫 model 的請求都要帶上目前選定的劇本案 ID，寫進 usage_log.project，
+    才能在主介面顯示「本案使用 Claude token 狀況」。前端在使用者確認劇本案之前
+    會鎖住整個下方區塊，理論上不會漏帶，這裡仍當作必要欄位驗證。"""
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("缺少或無效的 project（劇本案）ID")
+
+
 @app.post("/api/jobs")
 @require_auth
 def create_job():
@@ -303,6 +330,7 @@ def create_job():
             "file_name": file.filename,
             "detect_cover": _parse_bool(request.form.get("detect_cover"), config.COVER_DETECT_DEFAULT),
             "user_email": request.user_email,
+            "project": _require_project_id(request.form.get("project")),
         }
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -469,6 +497,7 @@ def _parse_review_settings(form):
         # request-handling 的路由裡被呼叫，直接拿 request.user_email
         # 是安全的（require_auth 裝飾器已經驗證過並存進去）
         "user_email": request.user_email,
+        "project": _require_project_id(form.get("project")),
     }
 
 
@@ -769,6 +798,15 @@ def admin_create_project():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"建立失敗：{exc}"}), 400
     return jsonify(project), 201
+
+
+@app.get("/admin/usage/totals")
+@require_admin
+def admin_get_usage_totals():
+    """回傳 Claude 系列 model 從有紀錄以來累積的總 token 用量與估計台幣費用，
+    顯示在管理員介面頁籤上方（取代舊版主介面的「本月使用量」——正式上線後
+    對一般使用者已無意義，改成只有管理員看得到的全站總量）。"""
+    return jsonify(_claude_usage_response(get_total_token_usage))
 
 
 @app.put("/admin/projects/<int:project_id>")
