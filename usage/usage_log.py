@@ -51,6 +51,14 @@ _lock = threading.Lock()
 # 訂閱方案週期無關，那是另一套帳務系統。
 _BILLING_CYCLE_START_DAY = int(os.environ.get("USAGE_BILLING_CYCLE_START_DAY", "1"))
 
+# schema（建表/補欄位/建索引）只需要在這個 process 生命週期裡成功跑過
+# 一次——這些都是冪等操作，跑第二次結果不會變，但每次都重跑會對
+# Postgres（尤其 Neon 這種每次連線都有實質延遲的服務）多花將近 1 秒，
+# 白白拖慢每一次查詢。第一次呼叫成功後就把這個旗標打開，之後的呼叫
+# 直接跳過整段 schema 檢查。呼叫端都在 _lock 保護下呼叫 _get_conn()，
+# 不會有多執行緒同時搶著跑這段初始化的問題。
+_schema_ready = False
+
 
 def _sql(query: str) -> str:
     """SQLite 用 `?` 佔位符寫查詢語法(單一事實來源)，這裡在 Postgres 模式
@@ -58,15 +66,12 @@ def _sql(query: str) -> str:
     return query.replace("?", "%s") if _USE_POSTGRES else query
 
 
-def _get_conn():
-    """回傳 (conn, cur)。SQLite 模式下 conn 跟 cur 是同一個物件(sqlite3.Connection
-    本身就有 execute());Postgres 模式下是分開的 conn/cursor，呼叫端一律用
-    cur.execute(...) 查詢、conn.commit()/conn.close() 管理連線，兩種模式都適用。"""
-    if _USE_POSTGRES:
-        import psycopg2
+def _ensure_schema(cur) -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
 
-        conn = psycopg2.connect(_DATABASE_URL)
-        cur = conn.cursor()
+    if _USE_POSTGRES:
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_log (
@@ -84,31 +89,47 @@ def _get_conn():
             if column not in existing_columns:
                 cur.execute(f"ALTER TABLE usage_log ADD COLUMN {column} {col_type}")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)")
+    else:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                model TEXT NOT NULL,
+                user_email TEXT
+            )
+            """
+        )
+        existing_columns = {row[1] for row in cur.execute("PRAGMA table_info(usage_log)")}
+        if "input_tokens" not in existing_columns:
+            cur.execute("ALTER TABLE usage_log ADD COLUMN input_tokens INTEGER")
+        if "output_tokens" not in existing_columns:
+            cur.execute("ALTER TABLE usage_log ADD COLUMN output_tokens INTEGER")
+        if "file_name" not in existing_columns:
+            cur.execute("ALTER TABLE usage_log ADD COLUMN file_name TEXT")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)"
+        )
+
+    _schema_ready = True
+
+
+def _get_conn():
+    """回傳 (conn, cur)。SQLite 模式下 conn 跟 cur 是同一個物件(sqlite3.Connection
+    本身就有 execute());Postgres 模式下是分開的 conn/cursor，呼叫端一律用
+    cur.execute(...) 查詢、conn.commit()/conn.close() 管理連線，兩種模式都適用。"""
+    if _USE_POSTGRES:
+        import psycopg2
+
+        conn = psycopg2.connect(_DATABASE_URL)
+        cur = conn.cursor()
+        _ensure_schema(cur)
         conn.commit()
         return conn, cur
 
     conn = sqlite3.connect(_DB_PATH)
     cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS usage_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_utc TEXT NOT NULL,
-            model TEXT NOT NULL,
-            user_email TEXT
-        )
-        """
-    )
-    existing_columns = {row[1] for row in cur.execute("PRAGMA table_info(usage_log)")}
-    if "input_tokens" not in existing_columns:
-        cur.execute("ALTER TABLE usage_log ADD COLUMN input_tokens INTEGER")
-    if "output_tokens" not in existing_columns:
-        cur.execute("ALTER TABLE usage_log ADD COLUMN output_tokens INTEGER")
-    if "file_name" not in existing_columns:
-        cur.execute("ALTER TABLE usage_log ADD COLUMN file_name TEXT")
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)"
-    )
+    _ensure_schema(cur)
     return conn, cur
 
 
