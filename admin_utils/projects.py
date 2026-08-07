@@ -30,6 +30,21 @@ def list_projects_by_owner(owner_id: int) -> list[dict]:
             conn.close()
 
 
+def list_owner_projects_excluding_closed(owner_id: int) -> list[dict]:
+    """列出某個使用者名下、狀態不是 closed 的專案（含狀態），給使用者
+    管理頁籤讀取某個使用者之後，順便顯示他手上專案清單用。"""
+    with LOCK:
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(
+                sql("SELECT id, name, status FROM projects WHERE owner = ? AND status != ? ORDER BY id"),
+                (owner_id, "closed"),
+            )
+            return [{"id": row[0], "name": row[1], "status": row[2]} for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_project(project_id: int) -> dict | None:
     with LOCK:
         conn, cur = get_ready_conn()

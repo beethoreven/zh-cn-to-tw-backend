@@ -682,6 +682,14 @@ def admin_get_user(user_id):
     return jsonify(user)
 
 
+@app.get("/admin/users/<int:user_id>/projects")
+@require_admin
+def admin_get_user_projects(user_id):
+    """給使用者管理頁籤讀取某個使用者之後，順便顯示他名下專案清單用
+    （排除 closed 狀態，closed 的專案對管理成員這件事已經沒有意義）。"""
+    return jsonify({"projects": admin_projects.list_owner_projects_excluding_closed(user_id)})
+
+
 @app.post("/admin/users")
 @require_admin
 def admin_create_user():
