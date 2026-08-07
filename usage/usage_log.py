@@ -30,19 +30,14 @@ from __future__ import annotations
 
 import calendar
 import os
-import sqlite3
-import threading
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-_DB_PATH = Path(__file__).resolve().parent.parent / "usage.db"
-_DATABASE_URL = os.environ.get("DATABASE_URL", "")
-_USE_POSTGRES = bool(_DATABASE_URL)
+from db_utils.connection import LOCK, get_ready_conn, sql
+
 _RESET_TZ = ZoneInfo("America/Los_Angeles")
 _TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 _UTC = ZoneInfo("UTC")
-_lock = threading.Lock()
 
 # 「本月」（Claude 用量統計）的起算日，預設每月 1 號。這個跟 Anthropic
 # Console 帳單實際的計費週期不一定一樣（Console 帳號的計費週期要申請
@@ -51,86 +46,13 @@ _lock = threading.Lock()
 # 訂閱方案週期無關，那是另一套帳務系統。
 _BILLING_CYCLE_START_DAY = int(os.environ.get("USAGE_BILLING_CYCLE_START_DAY", "1"))
 
-# schema（建表/補欄位/建索引）只需要在這個 process 生命週期裡成功跑過
-# 一次——這些都是冪等操作，跑第二次結果不會變，但每次都重跑會對
-# Postgres（尤其 Neon 這種每次連線都有實質延遲的服務）多花將近 1 秒，
-# 白白拖慢每一次查詢。第一次呼叫成功後就把這個旗標打開，之後的呼叫
-# 直接跳過整段 schema 檢查。呼叫端都在 _lock 保護下呼叫 _get_conn()，
-# 不會有多執行緒同時搶著跑這段初始化的問題。
-_schema_ready = False
-
 
 def _sql(query: str) -> str:
-    """SQLite 用 `?` 佔位符寫查詢語法(單一事實來源)，這裡在 Postgres 模式
-    下轉成 `%s`，避免每條查詢都要維護兩份幾乎一樣的字串。"""
-    return query.replace("?", "%s") if _USE_POSTGRES else query
-
-
-def _ensure_schema(cur) -> None:
-    global _schema_ready
-    if _schema_ready:
-        return
-
-    if _USE_POSTGRES:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS usage_log (
-                id SERIAL PRIMARY KEY,
-                timestamp_utc TEXT NOT NULL,
-                model TEXT NOT NULL,
-                user_email TEXT
-            )
-            """
-        )
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_log'")
-        existing_columns = {row[0] for row in cur.fetchall()}
-        for column in ("input_tokens", "output_tokens", "file_name"):
-            col_type = "TEXT" if column == "file_name" else "INTEGER"
-            if column not in existing_columns:
-                cur.execute(f"ALTER TABLE usage_log ADD COLUMN {column} {col_type}")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)")
-    else:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS usage_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_utc TEXT NOT NULL,
-                model TEXT NOT NULL,
-                user_email TEXT
-            )
-            """
-        )
-        existing_columns = {row[1] for row in cur.execute("PRAGMA table_info(usage_log)")}
-        if "input_tokens" not in existing_columns:
-            cur.execute("ALTER TABLE usage_log ADD COLUMN input_tokens INTEGER")
-        if "output_tokens" not in existing_columns:
-            cur.execute("ALTER TABLE usage_log ADD COLUMN output_tokens INTEGER")
-        if "file_name" not in existing_columns:
-            cur.execute("ALTER TABLE usage_log ADD COLUMN file_name TEXT")
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_usage_model_time ON usage_log(model, timestamp_utc)"
-        )
-
-    _schema_ready = True
+    return sql(query)
 
 
 def _get_conn():
-    """回傳 (conn, cur)。SQLite 模式下 conn 跟 cur 是同一個物件(sqlite3.Connection
-    本身就有 execute());Postgres 模式下是分開的 conn/cursor，呼叫端一律用
-    cur.execute(...) 查詢、conn.commit()/conn.close() 管理連線，兩種模式都適用。"""
-    if _USE_POSTGRES:
-        import psycopg2
-
-        conn = psycopg2.connect(_DATABASE_URL)
-        cur = conn.cursor()
-        _ensure_schema(cur)
-        conn.commit()
-        return conn, cur
-
-    conn = sqlite3.connect(_DB_PATH)
-    cur = conn.cursor()
-    _ensure_schema(cur)
-    return conn, cur
+    return get_ready_conn()
 
 
 def record_usage(
@@ -139,15 +61,16 @@ def record_usage(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     file_name: str | None = None,
+    project: int | None = None,
 ) -> None:
-    with _lock:
+    with LOCK:
         conn, cur = _get_conn()
         try:
             cur.execute(
                 _sql(
                     "INSERT INTO usage_log "
-                    "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name) "
-                    "VALUES (?, ?, ?, ?, ?, ?)"
+                    "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name, project) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)"
                 ),
                 (
                     datetime.now(_UTC).isoformat(),
@@ -156,6 +79,7 @@ def record_usage(
                     input_tokens,
                     output_tokens,
                     file_name,
+                    project,
                 ),
             )
             conn.commit()
@@ -171,7 +95,7 @@ def get_today_usage(model: str) -> int:
     start_utc = start_local.astimezone(_UTC).isoformat()
     end_utc = end_local.astimezone(_UTC).isoformat()
 
-    with _lock:
+    with LOCK:
         conn, cur = _get_conn()
         try:
             cur.execute(
@@ -223,7 +147,7 @@ def get_month_token_usage(model: str) -> dict:
     start_utc = start_local.astimezone(_UTC).isoformat()
     end_utc = end_local.astimezone(_UTC).isoformat()
 
-    with _lock:
+    with LOCK:
         conn, cur = _get_conn()
         try:
             cur.execute(

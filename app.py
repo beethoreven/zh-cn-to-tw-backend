@@ -10,6 +10,9 @@ from functools import wraps
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
+from admin_utils import permissions as admin_permissions
+from admin_utils import projects as admin_projects
+from admin_utils import users as admin_users
 from auth_utils import auth, whitelist
 from configs import config
 from jobs import job_manager
@@ -77,6 +80,25 @@ def require_auth(view_func):
     return wrapper
 
 
+def require_admin(view_func):
+    """
+    裝飾器：跟 require_auth 一樣先驗證登入/授權，另外還要求這個帳號
+    的角色是管理員，不然一律 401。用在管理員介面（使用者/權限/專案
+    管理）的所有 API 上。
+    """
+
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        token = auth.extract_bearer_token(request)
+        email = auth.verify_google_id_token(token)
+        if email is None or not whitelist.is_admin_user(email):
+            return jsonify({"error": "未登入或此帳號未獲管理員授權"}), 401
+        request.user_email = email
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok"})
@@ -86,7 +108,8 @@ def health():
 def auth_status():
     """
     給前端在登入後（或每次重新整理頁面時）確認用：這個 Google 帳號的
-    登入憑證有效嗎？這個 email 在白名單裡嗎？
+    登入憑證有效嗎？這個 email 在白名單裡嗎？是不是管理員（決定要不要
+    顯示「管理員介面」按鈕）？
 
     刻意獨立於 require_auth 之外（不共用那個裝飾器）——這支本身的
     用途就是「檢查授權狀態」，token 無效或未授權不算這支 API 本身失敗，
@@ -99,7 +122,13 @@ def auth_status():
     if email is None:
         return jsonify({"authorized": False, "error": "登入憑證無效或已過期"}), 401
 
-    return jsonify({"authorized": whitelist.is_permitted_user(email), "email": email}), 200
+    return jsonify(
+        {
+            "authorized": whitelist.is_permitted_user(email),
+            "is_admin": whitelist.is_admin_user(email),
+            "email": email,
+        }
+    ), 200
 
 
 @app.get("/api/teacher-notice")
@@ -576,6 +605,190 @@ def download_review(review_id):
     original_filename = source_job.get("original_filename") if source_job else None
     basename = _basename_from_original(original_filename, review_id)
     return _send_text_as(text, fmt, basename)
+
+
+# --- 管理員介面 ---
+#
+# 這一整段都掛 require_admin，只有 users.role 對應到 permissions.role
+# = "admin" 的帳號能呼叫。「有沒有真的改到東西」的判斷都在 admin_utils
+# 那幾支模組裡做（比對 DB 現有值 vs 送進來的新值），這裡只負責把
+# request 的資料轉成呼叫參數、把結果包成 API 回應。
+
+
+def _require_status(raw_value: str, valid: tuple, field_name: str) -> str:
+    if raw_value not in valid:
+        raise ValueError(f"{field_name} 必須是 {', '.join(valid)} 其中之一")
+    return raw_value
+
+
+def _require_role_id(raw_value) -> int:
+    try:
+        role_id = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("權限必須是數字")
+    if admin_permissions.get_permission(role_id) is None:
+        raise ValueError(f"找不到 id={role_id} 的權限")
+    return role_id
+
+
+@app.get("/admin/users")
+@require_admin
+def admin_list_users():
+    return jsonify({"users": admin_users.list_users(role_name=request.args.get("role"))})
+
+
+@app.get("/admin/users/active-names")
+@require_admin
+def admin_list_active_user_names():
+    """給專案管理頁籤的「負責人」下拉選單用。"""
+    return jsonify({"users": admin_users.list_active_user_names()})
+
+
+@app.get("/admin/users/<int:user_id>")
+@require_admin
+def admin_get_user(user_id):
+    user = admin_users.get_user(user_id)
+    if user is None:
+        return jsonify({"error": "找不到這個使用者"}), 404
+    return jsonify(user)
+
+
+@app.post("/admin/users")
+@require_admin
+def admin_create_user():
+    body = request.get_json(silent=True) or {}
+    try:
+        email = str(body.get("email") or "").strip()
+        if not email:
+            raise ValueError("信箱不能空白")
+        name = str(body.get("name") or "").strip()
+        role = _require_role_id(body.get("role"))
+        status = _require_status(body.get("status"), ("active", "deactive"), "狀態")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        user = admin_users.create_user(email, name, role, status)
+    except Exception as exc:  # noqa: BLE001
+        # 最常見的失敗原因是 email 已經存在(UNIQUE 限制)
+        return jsonify({"error": f"建立失敗：{exc}"}), 400
+    return jsonify(user), 201
+
+
+@app.put("/admin/users/<int:user_id>")
+@require_admin
+def admin_update_user(user_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        email = str(body.get("email") or "").strip()
+        if not email:
+            raise ValueError("信箱不能空白")
+        name = str(body.get("name") or "").strip()
+        role = _require_role_id(body.get("role"))
+        status = _require_status(body.get("status"), ("active", "deactive"), "狀態")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        changed = admin_users.update_user(user_id, email, name, role, status)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify({"changed": changed, "user": admin_users.get_user(user_id)})
+
+
+@app.get("/admin/permissions")
+@require_admin
+def admin_list_permissions():
+    # 使用者管理頁籤的「權限」下拉需要看到管理員選項，權限管理頁籤的
+    # 「選擇權限」下拉則要排除管理員——用查詢參數區分這兩種情境
+    include_admin = request.args.get("include_admin", "").lower() == "true"
+    return jsonify({"permissions": admin_permissions.list_permissions(exclude_admin=not include_admin)})
+
+
+@app.get("/admin/permissions/<int:permission_id>")
+@require_admin
+def admin_get_permission(permission_id):
+    permission = admin_permissions.get_permission(permission_id)
+    if permission is None:
+        return jsonify({"error": "找不到這個權限"}), 404
+    return jsonify(permission)
+
+
+@app.put("/admin/permissions/<int:permission_id>")
+@require_admin
+def admin_update_permission(permission_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        role = str(body.get("role") or "").strip()
+        if not role:
+            raise ValueError("權限名稱不能空白")
+        allowed_opus = int(body.get("allowed_opus"))
+        allowed_haiku = int(body.get("allowed_haiku"))
+        if allowed_opus < 0 or allowed_haiku < 0:
+            raise ValueError("使用上限不能是負數")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "使用上限必須是數字"}), 400
+
+    try:
+        changed = admin_permissions.update_permission(permission_id, role, allowed_opus, allowed_haiku)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify({"changed": changed, "permission": admin_permissions.get_permission(permission_id)})
+
+
+@app.get("/admin/projects")
+@require_admin
+def admin_list_projects():
+    return jsonify({"projects": admin_projects.list_projects()})
+
+
+@app.get("/admin/projects/<int:project_id>")
+@require_admin
+def admin_get_project(project_id):
+    project = admin_projects.get_project(project_id)
+    if project is None:
+        return jsonify({"error": "找不到這個專案"}), 404
+    return jsonify(project)
+
+
+@app.post("/admin/projects")
+@require_admin
+def admin_create_project():
+    body = request.get_json(silent=True) or {}
+    try:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise ValueError("名稱不能空白")
+        owner = int(body.get("owner"))
+        status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
+
+    try:
+        project = admin_projects.create_project(name, owner, status)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"建立失敗：{exc}"}), 400
+    return jsonify(project), 201
+
+
+@app.put("/admin/projects/<int:project_id>")
+@require_admin
+def admin_update_project(project_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise ValueError("名稱不能空白")
+        owner = int(body.get("owner"))
+        status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
+
+    try:
+        changed = admin_projects.update_project(project_id, name, owner, status)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify({"changed": changed, "project": admin_projects.get_project(project_id)})
 
 
 if __name__ == "__main__":

@@ -1,31 +1,81 @@
 """
-授權使用者白名單。
+授權檢查，完全走資料庫（users/permissions 表），不再用 PERMITTED_USER/
+ADMIN_ACCOUNT 環境變數白名單。
 
-從 config.PERMITTED_USER_RAW 讀取(實際來源是 PERMITTED_USER 環境變數,
-逗號分隔的 email 清單)——不是寫死在程式碼裡,這樣白名單本身就不會
-進版本控制、不會因為 repo 是 Public 就被任何人看到。
+原因：環境變數改了要重新部署才生效，DB 改了透過管理員介面立刻生效；
+而且兩份資料同時存在遲早會兜不起來（這個專案已經因為類似的問題踩過
+好幾次坑）。要新增/停用使用者、調整管理員身份，一律透過管理員介面的
+「使用者管理」頁籤操作，不需要碰 Render 的環境變數設定。
 
-要開放給新的使用者使用,不用改程式碼、不用 push:本機測試改用
-export 設定環境變數,正式環境去 Render 後台(Dashboard → 這個服務
-→ Environment)編輯 PERMITTED_USER 這個變數,存檔後 Render 會自動
-重新部署套用新值。要收回權限,把對應的 email 從清單裡拿掉即可。
-
-這裡比對的 email 是 Google 登入驗證過的(見 auth.py),不是使用者
-自己宣稱的字串——換句話說,能不能用完全由這份名單決定,不是知道
-email 字串就能冒充。
+效能考量：這裡的查詢結果會被短時間快取。前端輪詢 job/review 進度是
+每 1.5 秒打一次 API，每支保護路由都要驗證身份，如果每次都真的去打
+一次 Neon（單次連線+查詢實測要 1.2-1.6 秒），整個介面會變得幾乎無法
+使用。快取 TTL 設短（預設 30 秒），管理員在後台改了誰的權限，最多
+30 秒內生效，對這種個人規模的工具來說這個延遲完全可以接受，換來的是
+一般操作不會被這個查詢拖慢。
 """
 
 from __future__ import annotations
 
-from configs import config
+import os
+import threading
+import time
 
-PERMITTED_USERS = {
-    email.strip() for email in config.PERMITTED_USER_RAW.split(",") if email.strip()
-}
+from db_utils.connection import LOCK, get_ready_conn, sql
+
+_CACHE_TTL_SECONDS = int(os.environ.get("AUTH_CACHE_TTL_SECONDS", "30"))
+_cache_lock = threading.Lock()
+_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+def _query_user_auth_row(email: str):
+    with LOCK:
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(
+                sql(
+                    "SELECT users.status, permissions.role FROM users "
+                    "JOIN permissions ON users.role = permissions.id "
+                    "WHERE users.email = ?"
+                ),
+                (email,),
+            )
+            return cur.fetchone()
+        finally:
+            conn.close()
+
+
+def get_user_auth_info(email: str | None) -> dict | None:
+    """一次查出這個 email 的授權狀態(帶快取)，回傳 None 代表這個 email
+    不在 users 表裡；否則回傳 {"active": bool, "is_admin": bool}。"""
+    if not email:
+        return None
+
+    now = time.time()
+    with _cache_lock:
+        cached = _cache.get(email)
+        if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]
+
+    row = _query_user_auth_row(email)
+    if row is None:
+        result = None
+    else:
+        status, role = row
+        result = {"active": status == "active", "is_admin": role == "admin"}
+
+    with _cache_lock:
+        _cache[email] = (now, result)
+    return result
 
 
 def is_permitted_user(email: str | None) -> bool:
-    """檢查這個 email 是不是白名單裡的授權使用者。"""
-    if not email:
-        return False
-    return email in PERMITTED_USERS
+    """檢查這個 email 是不是 users 表裡的啟用中(active)使用者。"""
+    info = get_user_auth_info(email)
+    return info is not None and info["active"]
+
+
+def is_admin_user(email: str | None) -> bool:
+    """檢查這個 email 對應的角色是不是管理員，且帳號本身是啟用中。"""
+    info = get_user_auth_info(email)
+    return info is not None and info["active"] and info["is_admin"]

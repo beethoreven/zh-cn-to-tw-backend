@@ -21,11 +21,10 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 # Identity Services、後端驗證 ID Token 的 audience 都要用同一組
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
-# 刻意不寫死任何預設值——這份清單是真實個人資料，不該進版本控制，
-# 只能透過環境變數設定（本機用 export，正式環境在 Render 後台的
-# Environment 設定）。沒設定時視為空清單，也就是沒有任何人被授權，
-# 這是刻意的安全預設值（壞掉時關閉存取，而不是不小心開放給所有人）。
-PERMITTED_USER_RAW = os.environ.get("PERMITTED_USER", "")
+# 授權白名單/管理員身份都改成完全走 users/permissions 資料表管理
+# （見 auth_utils/whitelist.py），不再用 PERMITTED_USER/ADMIN_ACCOUNT
+# 這種環境變數白名單——改環境變數要重新部署才生效，改 DB 透過管理員
+# 介面立刻生效，而且不會有「環境變數」跟「DB」兩份資料兜不起來的風險。
 
 # LLM API 呼叫的逾時秒數（Gemini/Claude 共用）。曾經實際發生過呼叫卡住
 # 永遠沒回應、也沒拋錯的情況，加這個確保最差情況下還是會在有限時間內
