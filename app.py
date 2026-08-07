@@ -228,7 +228,15 @@ def _claude_usage_response(usage_by_model_fn) -> dict:
 @require_auth
 def get_project_usage(project_id):
     """回傳這個劇本案累積至今的 Claude token 用量與估計台幣費用，
-    給主介面「本案使用 Claude token 狀況」用。"""
+    給主介面「本案使用 Claude token 狀況」用。只有這個專案的負責人或
+    管理員能查——不然任何登入者都能靠猜連續整數 ID（1, 2, 3...）看到
+    別人專案的用量／費用資料，等於跨客戶資料外洩。"""
+    project = admin_projects.get_project(project_id)
+    if project is None:
+        return jsonify({"error": "找不到這個專案"}), 404
+    user_id = whitelist.get_user_id(request.user_email)
+    if project["owner"] != user_id and not whitelist.is_admin_user(request.user_email):
+        return jsonify({"error": "沒有權限查看這個專案的用量"}), 403
     return jsonify(_claude_usage_response(lambda model: get_project_token_usage(project_id, model)))
 
 
