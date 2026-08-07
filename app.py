@@ -5,10 +5,12 @@ from __future__ import annotations
 import io
 import os
 import threading
+from functools import wraps
 
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
+from auth_utils import auth, whitelist
 from configs import config
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
@@ -19,7 +21,26 @@ from usage.fx_rate import get_usd_twd_rate
 from usage.usage_log import get_month_token_usage, get_today_usage
 
 app = Flask(__name__)
-CORS(app)
+
+# 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
+# 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
+# allow_headers 要明確帶 Authorization——登入後每次 API 呼叫都會帶
+# `Authorization: Bearer <Google ID Token>`，沒有這行，瀏覽器的
+# CORS 預檢（preflight）會擋下這個 header，請求根本送不到後端。
+# expose_headers 帶 Content-Disposition——下載端點靠這個 header 告訴
+# 前端檔名，預設不在瀏覽器允許 JS 讀取的安全清單裡，要明確曝露出來，
+# 前端才能在改用 fetch + blob 下載（而不是直接 <a href> 導覽，因為
+# 那樣沒辦法附加 Authorization header）時，還原出正確的下載檔名。
+CORS(
+    app,
+    origins=[
+        "https://beethoreven.github.io",
+        r"http://localhost:\d+",
+        r"http://127\.0\.0\.1:\d+",
+    ],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Disposition"],
+)
 
 os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 
@@ -31,12 +52,58 @@ STATUS_LABELS = {
 }
 
 
+def require_auth(view_func):
+    """
+    裝飾器：檢查請求有沒有帶合法的 Google 登入憑證，且對應的 email 在白名單裡。
+
+    從 `Authorization: Bearer <token>` header 讀取前端登入後拿到的
+    Google ID Token，交給 auth.verify_google_id_token 驗證簽章/過期時間/
+    audience，拿到「Google 保證過的」email，再比對 whitelist.py 的白名單。
+    token 無效或 email 不在白名單，一律回 401，不會進到實際的路由邏輯。
+
+    前端會對應把整頁鎖住，但那只是給使用者看的——真正擋掉未授權存取
+    的是這裡，就算有人用 devtools 把前端的 disabled 拔掉，這一層一樣會擋。
+    """
+
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        token = auth.extract_bearer_token(request)
+        email = auth.verify_google_id_token(token)
+        if email is None or not whitelist.is_permitted_user(email):
+            return jsonify({"error": "未登入或此帳號未獲授權"}), 401
+        request.user_email = email
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok"})
 
 
+@app.get("/auth/status")
+def auth_status():
+    """
+    給前端在登入後（或每次重新整理頁面時）確認用：這個 Google 帳號的
+    登入憑證有效嗎？這個 email 在白名單裡嗎？
+
+    刻意獨立於 require_auth 之外（不共用那個裝飾器）——這支本身的
+    用途就是「檢查授權狀態」，token 無效或未授權不算這支 API 本身失敗，
+    是正常會發生的查詢結果，所以用 200 + authorized:false 表示，
+    只有真的沒帶 token / token 完全解不開，才回 401。
+    """
+    token = auth.extract_bearer_token(request)
+    email = auth.verify_google_id_token(token)
+
+    if email is None:
+        return jsonify({"authorized": False, "error": "登入憑證無效或已過期"}), 401
+
+    return jsonify({"authorized": whitelist.is_permitted_user(email), "email": email}), 200
+
+
 @app.get("/api/teacher-notice")
+@require_auth
 def get_teacher_notice():
     """讀取「阿舍老師的叮嚀」內容檔；檔案不存在或讀取失敗就回空字串，
     不要因為這個非必要的裝飾性內容讓整個介面掛掉。"""
@@ -49,6 +116,7 @@ def get_teacher_notice():
 
 
 @app.get("/api/options")
+@require_auth
 def get_options():
     """前端用來畫出設定欄位：可選 model、各欄位上下限與預設值。"""
     return jsonify(
@@ -89,6 +157,7 @@ def get_options():
 
 
 @app.get("/api/usage")
+@require_auth
 def get_usage():
     """回傳每個 model 今天（美西時區）已用次數與每日上限。"""
     return jsonify(
@@ -103,6 +172,7 @@ def get_usage():
 
 
 @app.get("/api/usage/monthly")
+@require_auth
 def get_monthly_usage():
     """回傳 Claude 系列 model 本月（台灣時區日曆月）的 token 用量與估計台幣費用。
 
@@ -174,6 +244,7 @@ def _parse_bool(raw_value, default: bool) -> bool:
 
 
 @app.post("/api/jobs")
+@require_auth
 def create_job():
     if "file" not in request.files:
         return jsonify({"error": "缺少檔案，請用 file 欄位上傳 PDF"}), 400
@@ -219,6 +290,7 @@ def create_job():
 
 
 @app.post("/api/jobs/direct-upload")
+@require_auth
 def create_direct_job():
     """直接上傳已經是繁體的 .docx/.txt，跳過 Stage 1，產生一個
     「已完成」的 job，讓 Stage 2 可以照平常的流程去校對。"""
@@ -242,6 +314,7 @@ def create_direct_job():
 
 
 @app.get("/api/jobs/<job_id>")
+@require_auth
 def get_job(job_id):
     job = job_manager.get_job(job_id)
     if job is None:
@@ -291,6 +364,7 @@ def _send_text_as(text: str, fmt: str, basename: str):
 
 
 @app.get("/api/jobs/<job_id>/download")
+@require_auth
 def download_job(job_id):
     job = job_manager.get_job(job_id)
     if job is None:
@@ -307,6 +381,7 @@ def download_job(job_id):
 
 
 @app.get("/api/review-options")
+@require_auth
 def get_review_options():
     return jsonify(
         {
@@ -382,6 +457,7 @@ def _launch_review(
 
 
 @app.post("/api/jobs/<job_id>/review")
+@require_auth
 def start_review(job_id):
     job = job_manager.get_job(job_id)
     if job is None:
@@ -404,6 +480,7 @@ def start_review(job_id):
 
 
 @app.post("/api/reviews/<review_id>/rerun")
+@require_auth
 def rerun_review(review_id):
     """對這次 review 套用勾選建議後的文字，重新再校對一輪（手動觸發，
     不做自動無限遞迴，避免無預警燒額度）。"""
@@ -435,6 +512,7 @@ def rerun_review(review_id):
 
 
 @app.get("/api/reviews/<review_id>")
+@require_auth
 def get_review(review_id):
     review = review_manager.get_review(review_id)
     if review is None:
@@ -454,6 +532,7 @@ def get_review(review_id):
 
 
 @app.post("/api/reviews/<review_id>/apply")
+@require_auth
 def apply_review(review_id):
     review = review_manager.get_review(review_id)
     if review is None:
@@ -479,6 +558,7 @@ def apply_review(review_id):
 
 
 @app.get("/api/reviews/<review_id>/download")
+@require_auth
 def download_review(review_id):
     review = review_manager.get_review(review_id)
     if review is None:
