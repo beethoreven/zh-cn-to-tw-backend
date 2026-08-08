@@ -11,8 +11,17 @@ instance——這個 instance 對「多執行緒同時呼叫 .ocr()」是否安�
 明確保證，加鎖是保守但正確的做法，避免潛在的相互干擾或崩潰，代價是
 兩份文件的 OCR 階段會排隊序列跑，不是真正平行（但 OCR 只是整體流程
 的一部分，Gemini 潤飾那段呼叫不受這個鎖影響，仍然可以同時進行）。
+
+CPU 執行緒數刻意限制成 1（見 _get_ocr）：Render 免費方案的 CPU 配額
+非常低（官方文件是 0.1 顆），PaddleOCR 底層的 OpenMP/BLAS 預設會開
+好幾條執行緒平行運算，在這種配額下只會互搶那一丁點 CPU、瘋狂 context
+switch，不但沒有加速，還會讓整個 process（包含 Flask 主執行緒）長時間
+無法回應任何請求，被 Render 的健康檢查判定「沒反應」直接砍掉重啟
+（實測 log 症狀：PaddlePaddle 自己的內部監控元件 bvar 持續噴
+「busy at sampling」，代表 CPU 已經被榨乾到連自己採樣都做不到）。
 """
 
+import os
 import threading
 
 from PIL import Image
@@ -20,13 +29,24 @@ from PIL import Image
 _ocr = None
 _ocr_lock = threading.Lock()
 
+_CPU_THREADS = int(os.environ.get("OCR_CPU_THREADS", "1"))
+
 
 def _get_ocr():
     global _ocr
     if _ocr is None:
+        # 這幾個環境變數要在 paddle 的原生函式庫真正被載入之前設好
+        # （底層 OpenMP/MKL/OpenBLAS 是在函式庫初始化時讀取這些值，
+        # 不是每次呼叫才讀），所以放在 import paddleocr 之前設定。
+        os.environ.setdefault("OMP_NUM_THREADS", str(_CPU_THREADS))
+        os.environ.setdefault("MKL_NUM_THREADS", str(_CPU_THREADS))
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_CPU_THREADS))
+
         from paddleocr import PaddleOCR
 
-        _ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+        _ocr = PaddleOCR(
+            use_angle_cls=True, lang="ch", show_log=False, cpu_threads=_CPU_THREADS
+        )
     return _ocr
 
 
