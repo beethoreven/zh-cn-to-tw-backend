@@ -21,6 +21,8 @@ Claude）-> OpenCC 校正 -> 驗證 -> 組裝。
 
 from __future__ import annotations
 
+import itertools
+
 from configs import config
 from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
@@ -28,7 +30,7 @@ from llm_utils import claude_client, gemini_client
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError
 from ocr_utils.cover_detect import evaluate_cover_page
 from ocr_utils.ocr_engine import ocr_page
-from ocr_utils.pdf_to_images import render_pdf_pages
+from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
 from output_utils.text_normalize import normalize_paragraph_breaks
 from validators.simplified_check import find_residual_simplified
 
@@ -143,19 +145,32 @@ def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
 
     try:
         job_manager.append_log(job_id, "開始將 PDF 轉成頁面圖片")
-        images = render_pdf_pages(pdf_path, dpi=dpi)
-        total_pages = len(images)
-        job_manager.append_log(job_id, f"PDF 共 {total_pages} 頁，轉圖完成")
+        # total_pages 用便宜的方式單獨查（不渲染任何一頁），page_images
+        # 則是逐頁 yield 的產生器——不要把整份 PDF 的每一頁圖片同時留在
+        # 記憶體裡，頁數多、DPI 高的劇本很容易讓記憶體用量衝到超過
+        # Render 免費方案的上限，把整個 process OOM 砍掉（連帶讓所有還
+        # 在進行中的請求，包括前端輪詢，一起失敗，且因為 job 狀態只存
+        # 在記憶體裡，process 重啟後那個 job 就徹底消失，前端看到的會是
+        # 「找不到這個 job」）。
+        total_pages = get_pdf_page_count(pdf_path)
+        page_images = render_pdf_pages(pdf_path, dpi=dpi)
+        job_manager.append_log(job_id, f"PDF 共 {total_pages} 頁，開始逐頁轉圖並辨識")
 
         if not detect_cover:
             job_manager.append_log(job_id, "「偵測首頁是否為封面」已關閉，略過封面偵測")
         elif total_pages < 2:
             job_manager.append_log(job_id, f"PDF 只有 {total_pages} 頁，略過封面偵測")
         else:
+            # 封面偵測需要先看過第 1、2 頁，只好先把這兩頁從產生器拉出來；
+            # 不管判定結果如何、甚至中途出錯，lookahead 裡拉到的頁面最後
+            # 都會用 itertools.chain 接回產生器最前面，不會漏掉任何一頁
+            lookahead = []
             try:
+                lookahead.append(next(page_images))
+                lookahead.append(next(page_images))
                 result = evaluate_cover_page(
-                    images[0],
-                    images[1],
+                    lookahead[0],
+                    lookahead[1],
                     config.COVER_DETECT_DARK_RATIO_THRESHOLD,
                     config.COVER_DETECT_SATURATION_THRESHOLD,
                     config.COVER_DETECT_RELATIVE_MARGIN,
@@ -171,8 +186,8 @@ def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
                     f" → 判定{'為封面' if result.is_cover else '不是封面'}",
                 )
                 if result.is_cover:
-                    images = images[1:]
-                    total_pages = len(images)
+                    lookahead = lookahead[1:]
+                    total_pages -= 1
                     job_manager.append_log(
                         job_id,
                         "首頁已自動移除，不列入 OCR 與後續處理範圍；"
@@ -184,9 +199,10 @@ def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
                 job_manager.append_log(
                     job_id, f"封面偵測發生錯誤：{exc}，跳過偵測，正常處理全部頁面", level="warning"
                 )
+            page_images = itertools.chain(lookahead, page_images)
 
         raw_pages = []
-        for idx, image in enumerate(images, start=1):
+        for idx, image in enumerate(page_images, start=1):
             job_manager.append_log(job_id, f"OCR 辨識第 {idx}/{total_pages} 頁")
             text = ocr_page(image)
             raw_pages.append(text)
