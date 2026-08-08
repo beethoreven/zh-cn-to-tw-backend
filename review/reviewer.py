@@ -11,6 +11,7 @@ Stage 2 校對者：把文字依字數分批送審，彙整成結構化建議清
 from __future__ import annotations
 
 import json
+import time
 
 from configs import config
 from llm_utils import claude_client, gemini_client
@@ -104,10 +105,23 @@ def _call_review_with_retry(
             truncated = True
             break
         except QuotaExceededError as exc:
-            review_manager.append_log(review_id, f"批次 {batch_no} {exc}", level="error")
+            # RPM（每分鐘請求數）是每分鐘重置的滾動視窗，跟每日額度 RPD
+            # 是兩回事，等一下再試很可能就會恢復，不像日額度真的用盡
+            # 那樣重試永遠沒用——用遞增的等待時間重試，最後一次還是
+            # 失敗才真的放棄這個批次
             quota_exceeded = True
-            break
+            if attempt < max_retry:
+                wait_seconds = config.QUOTA_RETRY_BASE_DELAY_SECONDS * attempt
+                review_manager.append_log(
+                    review_id,
+                    f"批次 {batch_no} {exc}，等待 {wait_seconds:.0f} 秒後重試（{attempt}/{max_retry}）",
+                    level="warning",
+                )
+                time.sleep(wait_seconds)
+            else:
+                review_manager.append_log(review_id, f"批次 {batch_no} {exc}", level="error")
         except Exception as exc:  # noqa: BLE001
+            quota_exceeded = False
             review_manager.append_log(
                 review_id,
                 f"批次 {batch_no} 第 {attempt} 次呼叫失敗：{exc}（{attempt}/{max_retry}）",
@@ -190,6 +204,11 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
             for finding in findings:
                 finding["batch"] = batch_no
             all_findings.extend(findings)
+
+            # 批次之間固定停一下，降低短時間內連續打太密集撞到 RPM 上限
+            # 的機率；最後一批不用等，反正後面沒有下一次呼叫了
+            if batch_no < len(chunks):
+                time.sleep(config.BATCH_DELAY_SECONDS)
 
         if exclude_fingerprints:
             before_count = len(all_findings)

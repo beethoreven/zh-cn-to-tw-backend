@@ -31,6 +31,16 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 # 失敗、讓既有的 retry/fallback 機制接手，不會讓整個批次卡死
 LLM_CALL_TIMEOUT_SECONDS = int(os.environ.get("LLM_CALL_TIMEOUT_SECONDS", "90"))
 
+# 批次跟批次之間固定延遲幾秒，降低短時間內連續打太密集撞到 Gemini RPM
+# （每分鐘請求數）上限的機率——RPM 是每分鐘重置的滾動視窗，跟每日額度
+# RPD 是兩回事，就算 RPD 還早，批次連續打太快一樣會被 429 擋下
+BATCH_DELAY_SECONDS = float(os.environ.get("BATCH_DELAY_SECONDS", "3"))
+
+# 遇到 429（額度已用盡）時的指數退避基準秒數：RPM 是滾動視窗，等一下
+# 再試很可能就會恢復，不像日額度真的用盡那樣重試永遠沒用；第 N 次
+# 重試會等 N 倍的這個秒數（預設 20 秒：第 1 次等 20 秒、第 2 次等 40 秒...）
+QUOTA_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("QUOTA_RETRY_BASE_DELAY_SECONDS", "20"))
+
 # 每個 refine 批次涵蓋幾頁一起送給 LLM 潤飾；"whole" 代表整本書只當一批
 REFINE_BATCH_PAGES = os.environ.get("REFINE_BATCH_PAGES", "20")
 
