@@ -457,11 +457,25 @@ def get_job(job_id):
 
 
 def _basename_from_original(original_filename: str | None, fallback: str) -> str:
+    """給 usage_log 的 file_name 欄位用：Stage 1 直接帶過來的內容（原始
+    檔名是 .pdf）記錄時不帶副檔名，直接上傳的 .docx/.txt 才是真的檔案、
+    副檔名要照實記錄——這裡只特意去掉 .pdf 是配合這條紀錄規則，不要
+    為了下載檔名的用途改掉這支，改成通用去副檔名會弄壞這個規則。"""
     if not original_filename:
         return fallback
     if original_filename.lower().endswith(".pdf"):
         return original_filename[: -len(".pdf")]
     return original_filename
+
+
+def _download_basename(original_filename: str | None, fallback: str) -> str:
+    """給下載檔名用：不管原始檔案是 .pdf/.docx/.txt，一律去掉副檔名，
+    避免後面重新接上 .txt/.docx 時變成雙重副檔名（例如直接上傳
+    「朱懿安先行本.txt」，下載時卻變成「朱懿安先行本.txt.txt」）。跟
+    _basename_from_original 是不同用途，不要共用。"""
+    if not original_filename:
+        return fallback
+    return os.path.splitext(original_filename)[0] or fallback
 
 
 def _send_text_as(text: str, fmt: str, basename: str):
@@ -497,7 +511,7 @@ def download_job(job_id):
         return jsonify({"error": "這個 job 還沒有結果"}), 409
 
     fmt = request.args.get("format", "txt").lower()
-    basename = _basename_from_original(job.get("original_filename"), job_id)
+    basename = _download_basename(job.get("original_filename"), job_id)
     return _send_text_as(job["result_text"], fmt, basename)
 
 
@@ -704,7 +718,7 @@ def download_review(review_id):
 
     source_job = job_manager.get_job(review["source_job_id"])
     original_filename = source_job.get("original_filename") if source_job else None
-    basename = _basename_from_original(original_filename, review_id)
+    basename = _download_basename(original_filename, review_id)
     return _send_text_as(text, fmt, basename)
 
 
