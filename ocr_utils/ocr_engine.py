@@ -19,6 +19,17 @@ switch，不但沒有加速，還會讓整個 process（包含 Flask 主執行�
 無法回應任何請求，被 Render 的健康檢查判定「沒反應」直接砍掉重啟
 （實測 log 症狀：PaddlePaddle 自己的內部監控元件 bvar 持續噴
 「busy at sampling」，代表 CPU 已經被榨乾到連自己採樣都做不到）。
+
+ocr_version 刻意指定成 "PP-OCRv3"（預設是較新的 PP-OCRv4）：實測在
+Render 上曾經直接以 SIGILL（Illegal instruction）整個 process 崩潰，
+C++ traceback 指向 PP-OCRv4 模型初始化時的 SelfAttentionFusePass
+這個圖優化步驟——PP-OCRv4 的模型架構多了自注意力機制相關元件，這個
+最佳化步驟疑似用到 Render 那台機器的 CPU 不支援的向量化指令。這也
+解釋了為什麼有時候能跑、有時候不能：Render 免費方案的 instance 可能
+被排到不同實體主機上，只有部分主機的 CPU 缺這個指令集。PP-OCRv3 是
+較舊、架構更單純（沒有自注意力融合這個最佳化路徑）的官方模型版本，
+用它來完全避開這個崩潰點，代價是辨識準確度可能略遜於 PP-OCRv4，但
+「跑不起來」比「準確度差一點」更嚴重，先求穩定可用。
 """
 
 import os
@@ -45,7 +56,11 @@ def _get_ocr():
         from paddleocr import PaddleOCR
 
         _ocr = PaddleOCR(
-            use_angle_cls=True, lang="ch", show_log=False, cpu_threads=_CPU_THREADS
+            use_angle_cls=True,
+            lang="ch",
+            show_log=False,
+            cpu_threads=_CPU_THREADS,
+            ocr_version="PP-OCRv3",
         )
     return _ocr
 
