@@ -48,6 +48,10 @@ def get_conn():
         conn = psycopg2.connect(DATABASE_URL)
     else:
         conn = sqlite3.connect(DB_PATH)
+        # SQLite 預設不強制 FOREIGN KEY 限制，要每個連線自己開啟，
+        # 不然 users.role/projects.owner 這類 FK 欄位可以悄悄寫入
+        # 不存在的 id，跟正式環境 Postgres 的行為兜不起來
+        conn.execute("PRAGMA foreign_keys = ON")
 
     cur = conn.cursor()
     return conn, cur

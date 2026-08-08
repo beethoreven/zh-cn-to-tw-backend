@@ -32,11 +32,15 @@ def _query_user_auth_row(email: str):
     with LOCK:
         conn, cur = get_ready_conn()
         try:
+            # 用 LOWER() 比對，不要求大小寫完全一致——管理員在後台輸入
+            # email 時打的大小寫，不一定跟 Google 這個帳號實際回傳的
+            # email claim 完全一樣，大小寫對不上會讓使用者莫名其妙被
+            # 擋在授權白名單外面，而且從後台看起來像是有把人加進去了
             cur.execute(
                 sql(
                     "SELECT users.status, permissions.role FROM users "
                     "JOIN permissions ON users.role = permissions.id "
-                    "WHERE users.email = ?"
+                    "WHERE LOWER(users.email) = LOWER(?)"
                 ),
                 (email,),
             )
@@ -90,7 +94,7 @@ def get_user_id(email: str | None) -> int | None:
     with LOCK:
         conn, cur = get_ready_conn()
         try:
-            cur.execute(sql("SELECT id FROM users WHERE email = ?"), (email,))
+            cur.execute(sql("SELECT id FROM users WHERE LOWER(email) = LOWER(?)"), (email,))
             row = cur.fetchone()
             return row[0] if row else None
         finally:

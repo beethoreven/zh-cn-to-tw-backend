@@ -366,12 +366,17 @@ def create_direct_job():
     file = request.files["file"]
     filename_lower = file.filename.lower()
 
-    if filename_lower.endswith(".txt"):
-        text = file.read().decode("utf-8")
-    elif filename_lower.endswith(".docx"):
-        text = docx_file_to_text(file)
-    else:
-        return jsonify({"error": "只接受 .docx 或 .txt 檔案"}), 400
+    try:
+        if filename_lower.endswith(".txt"):
+            text = file.read().decode("utf-8")
+        elif filename_lower.endswith(".docx"):
+            text = docx_file_to_text(file)
+        else:
+            return jsonify({"error": "只接受 .docx 或 .txt 檔案"}), 400
+    except UnicodeDecodeError:
+        return jsonify({"error": ".txt 檔案不是 UTF-8 編碼，請另存成 UTF-8 後再上傳"}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"讀取檔案內容失敗：{exc}"}), 400
 
     job_id = job_manager.create_job(original_filename=file.filename)
     job_manager.set_result(job_id, text)
@@ -668,6 +673,20 @@ def _require_role_id(raw_value) -> int:
     return role_id
 
 
+def _require_owner_id(raw_value) -> int:
+    """驗證負責人 ID 指向一個真的存在的使用者，不要只驗證「是不是數字」
+    就直接寫進 DB——SQLite 本機開發預設不強制 FK 限制，一個不存在的
+    owner id 會悄悄寫成功，只有 Postgres 正式環境才會因為 FK 違反而
+    噴錯，兩邊行為會兜不起來，且噴出來的還是沒被接住的 500。"""
+    try:
+        owner_id = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("負責人必須是數字")
+    if admin_users.get_user(owner_id) is None:
+        raise ValueError(f"找不到 id={owner_id} 的使用者")
+    return owner_id
+
+
 @app.get("/admin/users")
 @require_admin
 def admin_list_users():
@@ -804,7 +823,7 @@ def admin_create_project():
         name = str(body.get("name") or "").strip()
         if not name:
             raise ValueError("名稱不能空白")
-        owner = int(body.get("owner"))
+        owner = _require_owner_id(body.get("owner"))
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
@@ -833,7 +852,7 @@ def admin_update_project(project_id):
         name = str(body.get("name") or "").strip()
         if not name:
             raise ValueError("名稱不能空白")
-        owner = int(body.get("owner"))
+        owner = _require_owner_id(body.get("owner"))
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
@@ -846,4 +865,9 @@ def admin_update_project(project_id):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True, use_reloader=False)
+    # 預設關閉 debug 模式——Werkzeug 的互動除錯器一旦在正式環境被觸發，
+    # 會把完整 stack trace、原始碼路徑暴露給任何看得到錯誤頁面的人，
+    # 嚴重一點甚至是可利用的 RCE 介面。本機開發需要的話可以另外設
+    # FLASK_DEBUG=true，不需要動程式碼。
+    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False)

@@ -12,25 +12,35 @@
 （例如「秘密」）誤判成殘留簡體字，導致 retry 永遠卡在同一個字上。
 """
 
+import difflib
+
 import opencc
 
 _s2twp = opencc.OpenCC("s2twp")
 
 
 def find_residual_simplified(text: str) -> list[str]:
-    """回傳文字中偵測到的殘留簡體字元清單（去重，依出現順序）。"""
+    """回傳文字中偵測到的殘留簡體字元清單（去重，依出現順序）。
+
+    用 difflib 逐段比對 text 跟轉換結果，而不是直接 zip 逐字元比對——
+    s2twp 有些是詞組級的轉換（例如「内存」2 字轉成「記憶體」3 字），
+    一旦轉換前後長度不同，zip 會在長度不同的那個位置之後整段錯位，
+    導致後面本來沒問題的字被誤判成殘留、也可能讓真正殘留的字因為
+    比對到錯誤的位置而漏掉。difflib 的 opcode 是照實際插入/刪除/取代
+    的區段對齊，不會有這個問題。
+    """
     converted = _s2twp.convert(text)
     if converted == text:
         return []
 
     seen = set()
     residual = []
-    for original_char, converted_char in zip(text, converted):
-        if original_char != converted_char and original_char not in seen:
-            seen.add(original_char)
-            residual.append(original_char)
+    matcher = difflib.SequenceMatcher(a=text, b=converted, autojunk=False)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for char in text[i1:i2]:
+            if char not in seen:
+                seen.add(char)
+                residual.append(char)
     return residual
-
-
-def has_residual_simplified(text: str) -> bool:
-    return len(find_residual_simplified(text)) > 0

@@ -25,7 +25,6 @@ def _chunk_text(text: str, max_chars: int) -> list[tuple[str, int, int]]:
 
     paragraphs = text.split("\n\n")
     chunks = []
-    current_start = 0
     cursor = 0
     current_len = 0
     batch_start = 0
