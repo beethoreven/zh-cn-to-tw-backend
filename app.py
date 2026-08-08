@@ -17,7 +17,7 @@ from auth_utils import auth, whitelist
 from configs import config
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
-from pipeline.orchestrator import run_pipeline
+from pipeline.orchestrator import run_pipeline, run_refine_only_pipeline
 from review import review_manager
 from review.reviewer import run_review
 from usage.fx_rate import get_usd_twd_rate
@@ -365,6 +365,47 @@ def create_job():
 
     thread = threading.Thread(
         target=run_pipeline, args=(job_id, pdf_path, settings), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.post("/api/jobs/from-ocr-text")
+@require_auth
+def create_job_from_ocr_text():
+    """桌面版 App 專用路徑：PDF 已經在使用者本機的 zh-cn-to-tw-ocr-service
+    做完封面偵測 + PaddleOCR，這裡只接手做 OpenCC 簡轉繁 + LLM 潤飾那一半
+    （run_refine_only_pipeline），跟一般網頁上傳路徑共用同一套潤飾/校對
+    邏輯與 project/model 規則檢查，只是不重跑 OCR。"""
+    data = request.get_json(silent=True) or {}
+    pages = data.get("pages")
+    if not isinstance(pages, list) or not pages or not all(isinstance(p, str) for p in pages):
+        return jsonify({"error": "缺少或格式錯誤的 pages（應為文字陣列）"}), 400
+
+    try:
+        settings = {
+            "model": _parse_model(data.get("model")),
+            "batch_pages": _parse_batch_pages(data.get("batch_pages")),
+            "max_retry": _parse_bounded_int(
+                data.get("max_retry"),
+                config.REFINE_MAX_RETRY,
+                config.MAX_RETRY_MIN,
+                config.MAX_RETRY_MAX,
+                "max_retry",
+            ),
+            "file_name": data.get("file_name"),
+            "user_email": request.user_email,
+            "project": _require_project_id(data.get("project")),
+        }
+        _validate_project_and_model(settings["project"], settings["model"])
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    job_id = job_manager.create_job(original_filename=settings["file_name"], user_email=request.user_email)
+
+    thread = threading.Thread(
+        target=run_refine_only_pipeline, args=(job_id, pages, len(pages), settings), daemon=True
     )
     thread.start()
 
