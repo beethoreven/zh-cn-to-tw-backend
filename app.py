@@ -136,19 +136,6 @@ def auth_status():
     ), 200
 
 
-@app.get("/api/teacher-notice")
-@require_auth
-def get_teacher_notice():
-    """讀取「阿舍老師的叮嚀」內容檔；檔案不存在或讀取失敗就回空字串，
-    不要因為這個非必要的裝飾性內容讓整個介面掛掉。"""
-    try:
-        with open(config.TEACHER_NOTICE_PATH, "r", encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
-        text = ""
-    return jsonify({"text": text})
-
-
 @app.get("/api/options")
 @require_auth
 def get_options():

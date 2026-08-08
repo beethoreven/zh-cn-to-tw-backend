@@ -54,15 +54,6 @@ UPLOAD_DIR = os.environ.get(
     "UPLOAD_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 )
 
-# 「阿舍老師的叮嚀」內容來源：純文字檔，跟著程式碼一起進版控，要改內容
-# 直接編輯這個檔案再 push，不需要動到程式碼或另外做後台介面
-TEACHER_NOTICE_PATH = os.environ.get(
-    "TEACHER_NOTICE_PATH",
-    os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "content", "tutor_arthur_announce.txt"
-    ),
-)
-
 # 封面頁偵測的門檻，純本機影像統計（PIL），不用任何付費 API。這是啟發式
 # 規則會有誤判，門檻先抓一個合理的初始值，之後看實際誤判狀況再調整
 COVER_DETECT_DEFAULT = os.environ.get("COVER_DETECT_DEFAULT", "true").lower() == "true"
