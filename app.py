@@ -929,4 +929,13 @@ if __name__ == "__main__":
     # 嚴重一點甚至是可利用的 RCE 介面。本機開發需要的話可以另外設
     # FLASK_DEBUG=true，不需要動程式碼。
     debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False)
+    # threaded=True 是關鍵：Werkzeug 預設單執行緒，一次只能處理一個
+    # HTTP 連線。Stage 1/2 送出後會在背景執行緒跑 OCR/PDF/LLM 呼叫，
+    # 這段期間如果 Werkzeug 不能同時接其他連線，前端每 1.5 秒一次的
+    # 輪詢就會在處理中被卡住、逾時，瀏覽器端看到的就是 net::ERR_FAILED
+    # （連 CORS header 都沒有，因為連線根本沒被處理完）。程式碼裡本來
+    # 就已經對所有共用可變狀態加了鎖（db_utils.connection.LOCK、
+    # job_manager/review_manager 各自的 _lock、ocr_engine 的
+    # _ocr_lock），本來就是為了支援並行存取設計的，只是少了這個
+    # threaded=True 讓 Werkzeug 真的並行處理請求，之前一直沒發現。
+    app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False, threaded=True)
