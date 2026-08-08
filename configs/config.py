@@ -77,6 +77,14 @@ RPD_LIMITS = {
     "gemini-3.5-flash-lite": int(os.environ.get("GEMINI_3_5_FLASH_LITE_RPD_LIMIT", "500")),
 }
 
+# 「個人專案」（projects.owner 是 NULL、所有人共用的那個特殊專案）底下
+# Gemini 3.6 Flash 每天可以打幾次，比一般專案嚴格很多——這個專案沒有
+# 負責人可以追蹤是誰在用，用這個低額度避免被拿來當白嫖/洗爆額度的後門。
+# 特意不做成 DB 可調設定，就是不希望它跟一般的權限額度混在一起管理。
+PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT = int(
+    os.environ.get("PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT", "6")
+)
+
 # Gemini model 清單，附上要顯示在介面上的說明文字；也是 /api/usage
 # 每日呼叫次數（RPD）統計會遍歷的對象，只有 Gemini 有這種每日額度限制，
 # 所以這份清單刻意只保留 Gemini（Claude 是照 token 計費，不適用 RPD）

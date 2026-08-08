@@ -8,24 +8,31 @@ VALID_STATUSES = ("pending", "ongoing", "delayed", "done_not_paid", "paid", "clo
 
 
 def list_projects() -> list[dict]:
-    """給「選擇專案」下拉選單用。"""
+    """給「選擇專案」下拉選單用（管理員介面-專案管理）。不包含沒有
+    負責人、所有人共用的「個人專案」——那個不透過這個頁籤管理，
+    也不該出現在這裡。"""
     with LOCK:
         conn, cur = get_ready_conn()
         try:
-            cur.execute("SELECT id, name FROM projects ORDER BY id")
+            cur.execute("SELECT id, name FROM projects WHERE owner IS NOT NULL ORDER BY id")
             return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
         finally:
             conn.close()
 
 
 def list_projects_by_owner(owner_id: int) -> list[dict]:
-    """列出某個使用者名下的專案，給主介面「本案處理劇本」下拉選單用
-    （不限管理員——一般使用者查詢自己負責的專案）。"""
+    """列出某個使用者可以選的專案，給主介面「本案處理劇本」下拉選單用：
+    自己名下的專案，加上沒有負責人、所有人都能選的共用「個人專案」。
+    回傳的 owner 欄位是 None 就代表是這種共用專案——前端要用這個判斷
+    要不要套用「個人專案」的 model／額度限制。"""
     with LOCK:
         conn, cur = get_ready_conn()
         try:
-            cur.execute(sql("SELECT id, name FROM projects WHERE owner = ? ORDER BY id"), (owner_id,))
-            return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
+            cur.execute(
+                sql("SELECT id, name, owner FROM projects WHERE owner = ? OR owner IS NULL ORDER BY id"),
+                (owner_id,),
+            )
+            return [{"id": row[0], "name": row[1], "owner": row[2]} for row in cur.fetchall()]
         finally:
             conn.close()
 

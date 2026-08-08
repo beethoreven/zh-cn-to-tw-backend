@@ -17,7 +17,10 @@ _reviews = {}
 
 
 def create_review(
-    source_job_id: str, source_text: str, exclude_fingerprints: list | None = None
+    source_job_id: str,
+    source_text: str,
+    exclude_fingerprints: list | None = None,
+    user_email: str | None = None,
 ) -> str:
     """exclude_fingerprints：從上一輪（或更早幾輪）繼承下來、使用者已經
     明確不想套用的建議指紋（[original, suggested] 這種形式），這一輪
@@ -37,6 +40,7 @@ def create_review(
             "own_rejected_fingerprints": [],  # 這一輪套用時，使用者沒勾選的建議
             "error": None,
             "created_at": time.time(),
+            "user_email": user_email,
         }
     return review_id
 

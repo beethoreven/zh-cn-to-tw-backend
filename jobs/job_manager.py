@@ -16,7 +16,7 @@ _lock = threading.Lock()
 _jobs = {}
 
 
-def create_job(original_filename: str | None = None) -> str:
+def create_job(original_filename: str | None = None, user_email: str | None = None) -> str:
     job_id = uuid.uuid4().hex[:12]
     with _lock:
         _jobs[job_id] = {
@@ -27,6 +27,7 @@ def create_job(original_filename: str | None = None) -> str:
             "error": None,
             "original_filename": original_filename,
             "created_at": time.time(),
+            "user_email": user_email,
         }
     return job_id
 

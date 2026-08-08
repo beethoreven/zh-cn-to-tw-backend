@@ -21,7 +21,12 @@ from pipeline.orchestrator import run_pipeline
 from review import review_manager
 from review.reviewer import run_review
 from usage.fx_rate import get_usd_twd_rate
-from usage.usage_log import get_project_token_usage, get_today_usage, get_total_token_usage
+from usage.usage_log import (
+    get_project_token_usage,
+    get_today_project_model_count,
+    get_today_usage,
+    get_total_token_usage,
+)
 
 app = Flask(__name__)
 
@@ -307,6 +312,29 @@ def _require_project_id(raw_value) -> int:
         raise ValueError("缺少或無效的 project（劇本案）ID")
 
 
+def _validate_project_and_model(project_id: int, model: str) -> None:
+    """檢查這次呼叫的 project/model 組合合不合規則，不合規就拋
+    ValueError（呼叫端都已經在 try/except ValueError 裡，會被接住轉成
+    400）。目前只有「個人專案」（projects.owner 是 NULL、所有人共用的
+    那個特殊專案）有這些額外限制：不能用 Claude model，Gemini 3.6
+    Flash 每天有獨立的低額度——這個專案沒有負責人可以追蹤是誰在用，
+    這些限制是為了不讓它變成白嫖 Claude/洗爆 Gemini 額度的後門。
+    前端在選到這個專案時也會把 Claude 選項從選單拿掉，這裡是後端這層
+    真正擋掉未授權存取的地方（前端只是視覺提示）。"""
+    project = admin_projects.get_project(project_id)
+    if project is None:
+        raise ValueError(f"找不到 id={project_id} 的專案")
+    if project["owner"] is not None:
+        return  # 一般專案（有負責人）沒有這些額外限制
+
+    if model.startswith("claude"):
+        raise ValueError("個人專案不能使用 Claude Model")
+    if model == "gemini-3.6-flash":
+        used_today = get_today_project_model_count(project_id, model)
+        if used_today >= config.PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT:
+            raise ValueError("個人專案使用量達上限")
+
+
 @app.post("/api/jobs")
 @require_auth
 def create_job():
@@ -340,10 +368,11 @@ def create_job():
             "user_email": request.user_email,
             "project": _require_project_id(request.form.get("project")),
         }
+        _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    job_id = job_manager.create_job(original_filename=file.filename)
+    job_id = job_manager.create_job(original_filename=file.filename, user_email=request.user_email)
     pdf_path = os.path.join(config.UPLOAD_DIR, f"{job_id}.pdf")
     file.save(pdf_path)
 
@@ -378,18 +407,42 @@ def create_direct_job():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"讀取檔案內容失敗：{exc}"}), 400
 
-    job_id = job_manager.create_job(original_filename=file.filename)
+    job_id = job_manager.create_job(original_filename=file.filename, user_email=request.user_email)
     job_manager.set_result(job_id, text)
 
     return jsonify({"job_id": job_id}), 202
 
 
+def _get_owned_job(job_id: str):
+    """回傳 (job, None) 或 (None, 錯誤回應)。job_id 是 uuid4 前 12 碼的
+    亂數，本身就很難猜，但只擋「猜不到」不夠——只要曾經被別人看過這個
+    ID（截圖、支援訊息、瀏覽器歷史紀錄…），任何登入帳號都能拿去查別人
+    的 job，包括下載劇本內容。這裡加一層「一定要是自己建立的 job」才
+    給資料，找不到或不是自己的都回同一個 404，不特別區分，避免讓對方
+    知道「這個 ID 其實存在，只是不是你的」。管理員也不例外——管理員
+    介面本來就沒有瀏覽 job 的功能，不需要為了不存在的需求開這個後門。"""
+    job = job_manager.get_job(job_id)
+    if job is None or job.get("user_email") != request.user_email:
+        return None, (jsonify({"error": "找不到這個 job"}), 404)
+    return job, None
+
+
+def _get_owned_review(review_id: str):
+    """回傳 (review, None) 或 (None, 錯誤回應)，邏輯跟 _get_owned_job
+    一樣：review_id 難猜，但不是猜不到就等於安全，一定要是自己建立的
+    review 才給資料。"""
+    review = review_manager.get_review(review_id)
+    if review is None or review.get("user_email") != request.user_email:
+        return None, (jsonify({"error": "找不到這個 review"}), 404)
+    return review, None
+
+
 @app.get("/api/jobs/<job_id>")
 @require_auth
 def get_job(job_id):
-    job = job_manager.get_job(job_id)
-    if job is None:
-        return jsonify({"error": "找不到這個 job"}), 404
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
 
     return jsonify(
         {
@@ -437,9 +490,9 @@ def _send_text_as(text: str, fmt: str, basename: str):
 @app.get("/api/jobs/<job_id>/download")
 @require_auth
 def download_job(job_id):
-    job = job_manager.get_job(job_id)
-    if job is None:
-        return jsonify({"error": "找不到這個 job"}), 404
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
     if job["result_text"] is None:
         return jsonify({"error": "這個 job 還沒有結果"}), 409
 
@@ -490,8 +543,11 @@ def _parse_review_model(raw_value):
 
 
 def _parse_review_settings(form):
+    model = _parse_review_model(form.get("model"))
+    project = _require_project_id(form.get("project"))
+    _validate_project_and_model(project, model)
     return {
-        "model": _parse_review_model(form.get("model")),
+        "model": model,
         "batch_chars": _parse_whole_or_bounded_int(
             form.get("batch_chars"),
             config.REVIEW_BATCH_CHARS,
@@ -510,7 +566,7 @@ def _parse_review_settings(form):
         # request-handling 的路由裡被呼叫，直接拿 request.user_email
         # 是安全的（require_auth 裝飾器已經驗證過並存進去）
         "user_email": request.user_email,
-        "project": _require_project_id(form.get("project")),
+        "project": project,
     }
 
 
@@ -522,7 +578,10 @@ def _launch_review(
     file_name: str | None = None,
 ) -> str:
     review_id = review_manager.create_review(
-        source_job_id, text, exclude_fingerprints=exclude_fingerprints
+        source_job_id,
+        text,
+        exclude_fingerprints=exclude_fingerprints,
+        user_email=settings.get("user_email"),
     )
     run_settings = dict(settings, exclude_fingerprints=exclude_fingerprints or [], file_name=file_name)
     thread = threading.Thread(
@@ -535,9 +594,9 @@ def _launch_review(
 @app.post("/api/jobs/<job_id>/review")
 @require_auth
 def start_review(job_id):
-    job = job_manager.get_job(job_id)
-    if job is None:
-        return jsonify({"error": "找不到這個 job"}), 404
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
     if job["result_text"] is None:
         return jsonify({"error": "這個 job 還沒有繁化結果，無法校對"}), 409
 
@@ -560,9 +619,9 @@ def start_review(job_id):
 def rerun_review(review_id):
     """對這次 review 套用勾選建議後的文字，重新再校對一輪（手動觸發，
     不做自動無限遞迴，避免無預警燒額度）。"""
-    review = review_manager.get_review(review_id)
-    if review is None:
-        return jsonify({"error": "找不到這個 review"}), 404
+    review, err = _get_owned_review(review_id)
+    if err:
+        return err
 
     text = review["applied_text"] or review["source_text"]
     exclude_fingerprints = review_manager.get_combined_exclude_fingerprints(review_id)
@@ -590,9 +649,9 @@ def rerun_review(review_id):
 @app.get("/api/reviews/<review_id>")
 @require_auth
 def get_review(review_id):
-    review = review_manager.get_review(review_id)
-    if review is None:
-        return jsonify({"error": "找不到這個 review"}), 404
+    review, err = _get_owned_review(review_id)
+    if err:
+        return err
 
     return jsonify(
         {
@@ -610,9 +669,9 @@ def get_review(review_id):
 @app.post("/api/reviews/<review_id>/apply")
 @require_auth
 def apply_review(review_id):
-    review = review_manager.get_review(review_id)
-    if review is None:
-        return jsonify({"error": "找不到這個 review"}), 404
+    review, err = _get_owned_review(review_id)
+    if err:
+        return err
     if review["status"] != "done":
         return jsonify({"error": "這個校對還沒完成，無法套用"}), 409
 
@@ -636,9 +695,9 @@ def apply_review(review_id):
 @app.get("/api/reviews/<review_id>/download")
 @require_auth
 def download_review(review_id):
-    review = review_manager.get_review(review_id)
-    if review is None:
-        return jsonify({"error": "找不到這個 review"}), 404
+    review, err = _get_owned_review(review_id)
+    if err:
+        return err
 
     text = review["applied_text"] or review["source_text"]
     fmt = request.args.get("format", "txt").lower()
