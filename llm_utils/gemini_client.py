@@ -77,6 +77,18 @@ def _generate(
             "Gemini 因安全政策拒絕輸出這段內容（finish_reason=SAFETY）"
         )
 
+    # response.text 在沒有可用文字內容時是 None，不是空字串——除了上面
+    # 明確處理的 MAX_TOKENS/SAFETY，還有其他 finish_reason（例如
+    # RECITATION 版權疑慮、PROHIBITED_CONTENT、OTHER）也會導致這裡拿到
+    # None，直接 .strip() 會炸出一句看不出原因的
+    # 'NoneType' object has no attribute 'strip'。這裡明確檢查，把
+    # 實際的 finish_reason 印出來，才知道下次遇到該怎麼處理。
+    if response.text is None:
+        raise RuntimeError(
+            f"Gemini 沒有回傳可用的文字內容（finish_reason={finish_reason}），"
+            "可能是內容被判定為版權疑慮或其他政策問題，也可能是這次回應本身是空的"
+        )
+
     return response.text.strip()
 
 
