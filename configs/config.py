@@ -116,15 +116,17 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MAX_OUTPUT_TOKENS = int(os.environ.get("CLAUDE_MAX_OUTPUT_TOKENS", "8192"))
 
 # Claude 每百萬 token 的價格（美元），只用來換算「本月使用量」的參考費用；
-# Anthropic 之後如果調整價格，這裡也要跟著更新（可用環境變數覆蓋，不用改程式碼）
+# Anthropic 之後如果調整價格，這裡也要跟著更新（可用環境變數覆蓋，不用改程式碼）。
+#
+# claude-opus-5 已經從 ALL_MODELS 拿掉，不再提供選用（2026-08-10 起——
+# 校錯字沒有比 Haiku 準，價格卻貴很多，連引號方向都抓不精確，不值得
+# 這個價錢）。這裡也一併拿掉：usage_log 裡還留著過去的 model=claude-opus-5
+# 舊紀錄，但那份資料不會再被查詢/顯示，就讓它單純留在 DB 裡當歷史存檔，
+# 不用因為這裡少了對應的價格資訊而特地去處理那些舊資料。
 CLAUDE_PRICING = {
     "claude-haiku-4-5-20251001": {
         "input": float(os.environ.get("CLAUDE_HAIKU_PRICE_INPUT", "1.0")),
         "output": float(os.environ.get("CLAUDE_HAIKU_PRICE_OUTPUT", "5.0")),
-    },
-    "claude-opus-5": {
-        "input": float(os.environ.get("CLAUDE_OPUS_PRICE_INPUT", "5.0")),
-        "output": float(os.environ.get("CLAUDE_OPUS_PRICE_OUTPUT", "25.0")),
     },
 }
 
@@ -137,9 +139,18 @@ REVIEW_MAX_RETRY = int(os.environ.get("REVIEW_MAX_RETRY", "3"))
 
 DEFAULT_REVIEW_MODEL = os.environ.get("DEFAULT_REVIEW_MODEL", "gemini-3.6-flash")
 
-# Stage 1、Stage 2 共用的完整 model 清單（Gemini 2 個 + Claude 2 個）。
-# 各自呼叫互不影響；Claude 這兩個選項會實際計費（沒有 Gemini 那種
-# 持續性免費額度），說明文字裡有明講，避免使用者不小心選到。
+# Stage 1、Stage 2 共用的完整 model 清單（Gemini 2 個 + Claude 1 個）。
+# 各自呼叫互不影響；Claude 這個選項會實際計費（沒有 Gemini 那種持續性
+# 免費額度），說明文字裡有明講，避免使用者不小心選到。
+#
+# claude-opus-5 曾經是這裡的第三個選項，2026-08-10 起移除，不再提供
+# 選用——實測校對錯字（這個工具的核心目標）沒有比 Haiku 準，甚至連
+# 引號的方向都抓不精確，卻貴很多。這裡拿掉 key 就是唯一需要的伺服器端
+# 強制擋掉的地方：_parse_model() 檢查 `raw_value not in config.ALL_MODELS`，
+# 前端 Stage 1/2 的選單也是直接照這份清單畫的，兩邊都不需要再另外硬編碼
+# 排除 opus 的邏輯。CLAUDE_PRICING 也已經同步拿掉對應項目，「本案使用
+# Claude token 狀況」不會再顯示 Opus 這一項（過去的用量還在 usage_log
+# 裡，只是不再查詢/顯示，見 CLAUDE_PRICING 上面的說明）。
 ALL_MODELS = {
     "gemini-3.6-flash": AVAILABLE_MODELS["gemini-3.6-flash"],
     "gemini-3.5-flash-lite": AVAILABLE_MODELS["gemini-3.5-flash-lite"],
@@ -147,14 +158,7 @@ ALL_MODELS = {
         "label": "Claude Haiku 4.5",
         "description": (
             "會實際計費（無持續性免費額度），按 token 計費，速度快、成本較低；"
-            "適合大量處理，但語意判斷相對淺層，細膩度可能不如 Opus。"
-        ),
-    },
-    "claude-opus-5": {
-        "label": "Claude Opus 5",
-        "description": (
-            "會實際計費（無持續性免費額度），按 token 計費，是 Claude 最高階、"
-            "語意判斷最細膩的模型，但價格也最高（輸出約為 Haiku 的 5 倍）。"
+            "適合大量處理。"
         ),
     },
 }

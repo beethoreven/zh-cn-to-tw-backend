@@ -1,6 +1,8 @@
 """
-Claude API 層，Stage 1 潤飾 + Stage 2 校對都用這個 client（Haiku/Opus
-兩個選項，會實際計費，額度跟 Gemini 完全分開）。
+Claude API 層，Stage 1 潤飾 + Stage 2 校對都用這個 client（目前只有
+Haiku 這個選項——claude-opus-5 已於 2026-08-10 從 config.ALL_MODELS
+移除，不再提供選用，見該檔案的說明。會實際計費，額度跟 Gemini 完全
+分開）。
 
 跟 Gemini 一樣：每次呼叫都是獨立、無狀態的 API request；沒有配置
 ANTHROPIC_API_KEY 的話會在第一次呼叫時丟出清楚的錯誤，不會靜默失敗。

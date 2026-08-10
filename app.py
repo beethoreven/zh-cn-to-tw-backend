@@ -13,7 +13,7 @@ from flask_cors import CORS
 from admin_utils import permissions as admin_permissions
 from admin_utils import projects as admin_projects
 from admin_utils import users as admin_users
-from auth_utils import auth, whitelist
+from auth_utils import auth, sessions, whitelist
 from configs import config
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
@@ -33,7 +33,9 @@ app = Flask(__name__)
 # 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
 # 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
 # allow_headers 要明確帶 Authorization——登入後每次 API 呼叫都會帶
-# `Authorization: Bearer <Google ID Token>`，沒有這行，瀏覽器的
+# `Authorization: Bearer <session token>`（見 auth_utils/sessions.py：
+# 這是應用程式自己簽發的長效憑證，不是 Google ID Token 本身，Google
+# 那個只在 /auth/login 換發 session 的當下用一次），沒有這行，瀏覽器的
 # CORS 預檢（preflight）會擋下這個 header，請求根本送不到後端。
 # expose_headers 帶 Content-Disposition——下載端點靠這個 header 告訴
 # 前端檔名，預設不在瀏覽器允許 JS 讀取的安全清單裡，要明確曝露出來，
@@ -62,12 +64,14 @@ STATUS_LABELS = {
 
 def require_auth(view_func):
     """
-    裝飾器：檢查請求有沒有帶合法的 Google 登入憑證，且對應的 email 在白名單裡。
+    裝飾器：檢查請求有沒有帶合法的 session token，且對應的 email 在
+    白名單裡。
 
     從 `Authorization: Bearer <token>` header 讀取前端登入後拿到的
-    Google ID Token，交給 auth.verify_google_id_token 驗證簽章/過期時間/
-    audience，拿到「Google 保證過的」email，再比對 whitelist.py 的白名單。
-    token 無效或 email 不在白名單，一律回 401，不會進到實際的路由邏輯。
+    session token（見 auth_utils/sessions.py——這是應用程式自己簽發的
+    長效憑證，不是 Google ID Token 本身），反查對應的 email，再比對
+    whitelist.py 的白名單。token 無效或 email 不在白名單，一律回 401，
+    不會進到實際的路由邏輯。
 
     前端會對應把整頁鎖住，但那只是給使用者看的——真正擋掉未授權存取
     的是這裡，就算有人用 devtools 把前端的 disabled 拔掉，這一層一樣會擋。
@@ -76,7 +80,7 @@ def require_auth(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
         token = auth.extract_bearer_token(request)
-        email = auth.verify_google_id_token(token)
+        email = sessions.resolve_session(token)
         if email is None or not whitelist.is_permitted_user(email):
             return jsonify({"error": "未登入或此帳號未獲授權"}), 401
         request.user_email = email
@@ -95,7 +99,7 @@ def require_admin(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
         token = auth.extract_bearer_token(request)
-        email = auth.verify_google_id_token(token)
+        email = sessions.resolve_session(token)
         if email is None or not whitelist.is_admin_user(email):
             return jsonify({"error": "未登入或此帳號未獲管理員授權"}), 401
         request.user_email = email
@@ -109,12 +113,56 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.post("/auth/login")
+def auth_login():
+    """
+    前端登入流程的唯一入口：拿 Google ID Token 換一個應用程式自己的
+    session token。
+
+    Google ID Token 只在這裡驗證這一次（簽章/過期時間/audience），驗證
+    通過、且 email 在白名單裡，就簽發一個 session token 存進 sessions
+    表，回傳給前端存起來，之後所有 API 呼叫都改帶這個 session token，
+    不再是 Google ID Token 本身——Google 那個效期固定約 1 小時，拿它
+    當長效憑證會讓工作階段每小時被打斷一次，這是這個 session token
+    層存在的原因，細節說明見 auth_utils/sessions.py 開頭的註解。
+
+    body 需要 { "id_token": "<Google ID Token>" }。
+    """
+    body = request.get_json(silent=True) or {}
+    id_token = body.get("id_token")
+    email = auth.verify_google_id_token(id_token)
+    if email is None:
+        return jsonify({"error": "Google 登入憑證無效或已過期，請重新登入"}), 401
+
+    if not whitelist.is_permitted_user(email):
+        return jsonify({"error": "此帳號尚未獲得授權", "email": email}), 403
+
+    token = sessions.create_session(email)
+    return jsonify(
+        {
+            "session_token": token,
+            "email": email,
+            "is_admin": whitelist.is_admin_user(email),
+        }
+    ), 200
+
+
+@app.post("/auth/logout")
+def auth_logout():
+    """登出：把 session token 從資料庫刪掉，之後這個 token 就不再有效。
+    找不到/已經失效也視為成功——登出的目的（這個 token 不能再用）本來
+    就已經達成，不需要因為它「本來就已經沒了」而回錯誤。"""
+    token = auth.extract_bearer_token(request)
+    sessions.delete_session(token)
+    return jsonify({"status": "ok"}), 200
+
+
 @app.get("/auth/status")
 def auth_status():
     """
-    給前端在登入後（或每次重新整理頁面時）確認用：這個 Google 帳號的
-    登入憑證有效嗎？這個 email 在白名單裡嗎？是不是管理員（決定要不要
-    顯示「管理員介面」按鈕）？
+    給前端在登入後（或每次重新整理頁面時）確認用：這個 session token
+    還有效嗎？對應的帳號在白名單裡嗎？是不是管理員（決定要不要顯示
+    「管理員介面」按鈕）？
 
     刻意獨立於 require_auth 之外（不共用那個裝飾器）——這支本身的
     用途就是「檢查授權狀態」，token 無效或未授權不算這支 API 本身失敗，
@@ -122,10 +170,10 @@ def auth_status():
     只有真的沒帶 token / token 完全解不開，才回 401。
     """
     token = auth.extract_bearer_token(request)
-    email = auth.verify_google_id_token(token)
+    email = sessions.resolve_session(token)
 
     if email is None:
-        return jsonify({"authorized": False, "error": "登入憑證無效或已過期"}), 401
+        return jsonify({"authorized": False, "error": "登入已逾期或已登出，請重新登入"}), 401
 
     return jsonify(
         {
@@ -887,15 +935,14 @@ def admin_update_permission(permission_id):
         role = str(body.get("role") or "").strip()
         if not role:
             raise ValueError("權限名稱不能空白")
-        allowed_opus = int(body.get("allowed_opus"))
         allowed_haiku = int(body.get("allowed_haiku"))
-        if allowed_opus < 0 or allowed_haiku < 0:
+        if allowed_haiku < 0:
             raise ValueError("使用上限不能是負數")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "使用上限必須是數字"}), 400
 
     try:
-        changed = admin_permissions.update_permission(permission_id, role, allowed_opus, allowed_haiku)
+        changed = admin_permissions.update_permission(permission_id, role, allowed_haiku)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "permission": admin_permissions.get_permission(permission_id)})
