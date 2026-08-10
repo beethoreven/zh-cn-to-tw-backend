@@ -56,9 +56,11 @@ def _refine_and_correct(
     user_email,
     file_name: str | None,
     project: int | None,
-) -> str:
-    """呼叫 LLM 潤飾並用 OpenCC 校正，回傳最終文字；絕不拋出例外，
-    任何失敗都退回 traditional_text（純 OpenCC 結果）。"""
+) -> tuple[str, bool]:
+    """呼叫 LLM 潤飾並用 OpenCC 校正，回傳 (最終文字, 這個 model 的額度是否
+    已用盡)；絕不拋出例外，任何失敗都退回 traditional_text（純 OpenCC
+    結果）。額度用盡的旗標讓呼叫端可以決定要不要乾脆放棄剩下的批次，不用
+    每批次都重新撞一次已經確定用盡的額度、白白浪費重試等待時間。"""
     refine_fn = claude_client.refine_text if model.startswith("claude") else gemini_client.refine_text
 
     refined = None
@@ -135,7 +137,7 @@ def _refine_and_correct(
             + ("，建議稍後重新處理這本書" if transient_error else ""),
             level="warning",
         )
-        return traditional_text
+        return traditional_text, quota_exceeded
 
     try:
         # LLM 的工作只是潤飾格式，不負責簡轉繁本身；不管它做得好不好，
@@ -152,14 +154,14 @@ def _refine_and_correct(
             )
         else:
             job_manager.append_log(job_id, f"批次 {batch_no} 潤飾與校正完成")
-        return corrected
+        return corrected, False
     except Exception as exc:  # noqa: BLE001
         job_manager.append_log(
             job_id,
             f"批次 {batch_no} 潤飾後的校正階段發生錯誤：{exc}，改用未潤飾的簡轉繁結果",
             level="warning",
         )
-        return traditional_text
+        return traditional_text, False
 
 
 def run_ocr_stage(job_id: str, pdf_path: str, dpi: int, detect_cover: bool) -> tuple[list[str], int]:
@@ -252,6 +254,12 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     refined_chunks = []
     batch_list = list(_batches(raw_pages, batch_size))
     total_batches = len(batch_list)
+    # 這個 model 的額度一旦確定用盡（某一批重試 max_retry 次後仍是
+    # QuotaExceededError），後面的批次不可能突然又有額度，繼續一批一批
+    # 重試只是浪費時間（每批都要等完整的退避重試才會放棄）——確定用盡後
+    # 直接跳過 LLM 呼叫，剩下的批次只做決定性的 OpenCC 簡轉繁，把已經
+    # 做出來的成果盡快組起來給使用者，而不是繼續卡在注定失敗的重試上。
+    stop_calling_llm = False
 
     for batch_no, (start_idx, page_group) in enumerate(batch_list, start=1):
         page_range = f"{start_idx + 1}-{start_idx + len(page_group)}"
@@ -263,9 +271,23 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
 
         try:
             traditional_text = convert_to_traditional(raw_batch_text)
-            final_text = _refine_and_correct(
-                job_id, batch_no, traditional_text, model, max_retry, user_email, file_name, project
-            )
+            if stop_calling_llm:
+                job_manager.append_log(
+                    job_id, f"批次 {batch_no} 額度已用盡，跳過 LLM 潤飾，只做簡轉繁"
+                )
+                final_text = traditional_text
+            else:
+                final_text, quota_exhausted = _refine_and_correct(
+                    job_id, batch_no, traditional_text, model, max_retry, user_email, file_name, project
+                )
+                if quota_exhausted:
+                    stop_calling_llm = True
+                    job_manager.append_log(
+                        job_id,
+                        f"批次 {batch_no} 額度已用盡，重試 {max_retry} 次仍失敗，"
+                        "後續批次直接改用簡轉繁、不再重試 LLM 潤飾",
+                        level="warning",
+                    )
         except Exception as exc:  # noqa: BLE001
             # 保底：這個批次不管在哪個環節出了非預期狀況，都不該讓
             # 整份文件的輸出報銷，退回完全沒處理過的 OCR 原始文字
@@ -283,8 +305,10 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
         refined_chunks.append(final_text)
 
         # 批次之間固定停一下，降低短時間內連續打太密集撞到 RPM 上限
-        # 的機率；最後一批不用等，反正後面沒有下一次呼叫了
-        if batch_no < total_batches:
+        # 的機率；最後一批不用等（後面沒有下一次呼叫了），額度已確定
+        # 用盡、後面都不再呼叫 LLM 的情況也不用等（這個延遲本來就是為了
+        # 保護 API 呼叫，沒有呼叫就沒有必要空等）
+        if batch_no < total_batches and not stop_calling_llm:
             time.sleep(config.BATCH_DELAY_SECONDS)
 
     result_text = "\n\n".join(refined_chunks)

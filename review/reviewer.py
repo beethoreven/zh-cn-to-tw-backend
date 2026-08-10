@@ -85,7 +85,10 @@ def _call_review_with_retry(
     user_email,
     file_name: str | None,
     project: int | None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
+    """回傳 (這一批的校對建議, 這個 model 的額度是否已用盡)，額度用盡的
+    旗標讓呼叫端可以決定要不要放棄剩下的批次，不用每批次都重新撞一次
+    已經確定用盡的額度。"""
     review_fn = claude_client.review_text if model.startswith("claude") else gemini_client.review_text
 
     raw = None
@@ -161,21 +164,21 @@ def _call_review_with_retry(
             + ("，建議稍後重新校對" if transient_error else ""),
             level="warning",
         )
-        return []
+        return [], quota_exceeded
 
     try:
         findings = _parse_findings(raw)
         review_manager.append_log(
             review_id, f"批次 {batch_no} 校對完成，找到 {len(findings)} 筆建議"
         )
-        return findings
+        return findings, False
     except Exception as exc:  # noqa: BLE001
         review_manager.append_log(
             review_id,
             f"批次 {batch_no} 回傳內容解析失敗：{exc}，這批文字沒有校對結果",
             level="warning",
         )
-        return []
+        return [], False
 
 
 def run_review(review_id: str, text: str, settings: dict | None = None):
@@ -206,12 +209,31 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
         )
 
         all_findings = []
+        # 這個 model 的額度一旦確定用盡，後面的批次不可能突然又有額度，
+        # 繼續一批一批重試只是浪費時間——確定用盡後直接跳過剩下批次的
+        # LLM 呼叫，把已經校對出來的結果盡快回給使用者。
+        stop_calling_llm = False
         for batch_no, (chunk_text, _start, _end) in enumerate(chunks, start=1):
             review_manager.append_log(review_id, f"處理批次 {batch_no}/{len(chunks)}")
+
+            if stop_calling_llm:
+                review_manager.append_log(
+                    review_id, f"批次 {batch_no} 額度已用盡，跳過這批的校對"
+                )
+                continue
+
             try:
-                findings = _call_review_with_retry(
+                findings, quota_exhausted = _call_review_with_retry(
                     review_id, batch_no, chunk_text, model, max_retry, user_email, file_name, project
                 )
+                if quota_exhausted:
+                    stop_calling_llm = True
+                    review_manager.append_log(
+                        review_id,
+                        f"批次 {batch_no} 額度已用盡，重試 {max_retry} 次仍失敗，"
+                        "後續批次不再校對",
+                        level="warning",
+                    )
             except Exception as exc:  # noqa: BLE001
                 # 保底：這一批不管出了什麼非預期狀況，都只讓這批沒有結果，
                 # 不能讓整個校對任務失敗、什麼建議都拿不到
@@ -225,8 +247,9 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
             all_findings.extend(findings)
 
             # 批次之間固定停一下，降低短時間內連續打太密集撞到 RPM 上限
-            # 的機率；最後一批不用等，反正後面沒有下一次呼叫了
-            if batch_no < len(chunks):
+            # 的機率；最後一批不用等（後面沒有下一次呼叫了），額度已確定
+            # 用盡、後面都不再呼叫 LLM 的情況也不用等
+            if batch_no < len(chunks) and not stop_calling_llm:
                 time.sleep(config.BATCH_DELAY_SECONDS)
 
         if exclude_fingerprints:
