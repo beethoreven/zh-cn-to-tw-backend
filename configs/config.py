@@ -41,6 +41,13 @@ BATCH_DELAY_SECONDS = float(os.environ.get("BATCH_DELAY_SECONDS", "3"))
 # 重試會等 N 倍的這個秒數（預設 20 秒：第 1 次等 20 秒、第 2 次等 40 秒...）
 QUOTA_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("QUOTA_RETRY_BASE_DELAY_SECONDS", "20"))
 
+# 遇到對方伺服器暫時性錯誤（Gemini 503 UNAVAILABLE「需求量過大」、Claude
+# 529 overloaded_error）時的指數退避基準秒數，邏輯跟上面 429 額度用盡
+# 一樣（第 N 次重試等 N 倍），但基準秒數短很多——這類問題通常幾秒到
+# 幾十秒內就會恢復，不像 RPM 是以分鐘為單位的滾動視窗，用一樣長的等待
+# 時間只是浪費時間。
+TRANSIENT_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("TRANSIENT_RETRY_BASE_DELAY_SECONDS", "5"))
+
 # 每個 refine 批次涵蓋幾頁一起送給 LLM 潤飾；"whole" 代表整本書只當一批
 REFINE_BATCH_PAGES = os.environ.get("REFINE_BATCH_PAGES", "20")
 

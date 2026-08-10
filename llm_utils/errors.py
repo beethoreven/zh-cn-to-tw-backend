@@ -8,3 +8,10 @@ class OutputTruncatedError(RuntimeError):
 class QuotaExceededError(RuntimeError):
     """API 額度（RPD/RPM 或預付額度）已經用盡，這不是暫時性錯誤，
     重試同一個 model 沒有意義，除非等額度重置或換一個 model。"""
+
+
+class TransientAPIError(RuntimeError):
+    """伺服器端暫時性錯誤（例如 Gemini 503 UNAVAILABLE「目前需求量過大」、
+    Claude 529 overloaded_error），跟 QuotaExceededError 不一樣：不是
+    額度用盡，是對方伺服器當下暫時撐不住，通常幾秒到幾十秒內就會恢復，
+    值得用短一點的等待時間重試，不像額度用盡那樣重試沒有意義。"""

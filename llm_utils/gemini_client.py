@@ -13,7 +13,7 @@ from google.genai import types
 
 from configs import config
 from llm_utils.call_timeout import call_with_timeout
-from llm_utils.errors import OutputTruncatedError, QuotaExceededError
+from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from llm_utils.prompts import REFINE_PROMPT
 from review.prompts import REVIEW_PROMPT
 from usage.usage_log import record_usage
@@ -61,6 +61,13 @@ def _generate(
             raise QuotaExceededError(
                 f"{model_name} 的 API 額度已用盡（429 RESOURCE_EXHAUSTED），"
                 "重試同一個 model 沒有用，建議換一個 model 或等額度重置"
+            ) from exc
+        if exc.code in (500, 502, 503, 504):
+            # 這幾個是 Gemini 那邊伺服器暫時性的問題（最常見是 503
+            # UNAVAILABLE「目前需求量過大」），不是我們的額度用盡，通常
+            # 幾秒到幾十秒內就會恢復，值得重試。
+            raise TransientAPIError(
+                f"{model_name} 伺服器暫時無法處理（{exc.code} {exc.status}），可能是對方需求量過大"
             ) from exc
         raise
 

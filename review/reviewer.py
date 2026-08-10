@@ -15,7 +15,7 @@ import time
 
 from configs import config
 from llm_utils import claude_client, gemini_client
-from llm_utils.errors import OutputTruncatedError, QuotaExceededError
+from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from review import review_manager
 
 
@@ -91,6 +91,7 @@ def _call_review_with_retry(
     raw = None
     truncated = False
     quota_exceeded = False
+    transient_error = False
     for attempt in range(1, max_retry + 1):
         try:
             review_manager.append_log(
@@ -120,8 +121,23 @@ def _call_review_with_retry(
                 time.sleep(wait_seconds)
             else:
                 review_manager.append_log(review_id, f"批次 {batch_no} {exc}", level="error")
+        except TransientAPIError as exc:
+            # 對方伺服器暫時性問題（不是額度用盡），通常幾秒到幾十秒內
+            # 會恢復，用比 429 短的等待時間重試。
+            transient_error = True
+            if attempt < max_retry:
+                wait_seconds = config.TRANSIENT_RETRY_BASE_DELAY_SECONDS * attempt
+                review_manager.append_log(
+                    review_id,
+                    f"批次 {batch_no} {exc}，等待 {wait_seconds:.0f} 秒後重試（{attempt}/{max_retry}）",
+                    level="warning",
+                )
+                time.sleep(wait_seconds)
+            else:
+                review_manager.append_log(review_id, f"批次 {batch_no} {exc}", level="error")
         except Exception as exc:  # noqa: BLE001
             quota_exceeded = False
+            transient_error = False
             review_manager.append_log(
                 review_id,
                 f"批次 {batch_no} 第 {attempt} 次呼叫失敗：{exc}（{attempt}/{max_retry}）",
@@ -131,6 +147,8 @@ def _call_review_with_retry(
     if raw is None:
         if quota_exceeded:
             reason = "額度已用盡"
+        elif transient_error:
+            reason = "對方伺服器暫時無法處理"
         elif truncated:
             reason = "輸出被截斷"
         else:
@@ -139,7 +157,8 @@ def _call_review_with_retry(
             review_id,
             f"批次 {batch_no} {reason}，這批文字沒有校對結果"
             + ("，建議調小批次字數重新校對" if truncated else "")
-            + ("，建議換一個 model 或等額度重置後再試" if quota_exceeded else ""),
+            + ("，建議換一個 model 或等額度重置後再試" if quota_exceeded else "")
+            + ("，建議稍後重新校對" if transient_error else ""),
             level="warning",
         )
         return []

@@ -14,7 +14,7 @@ from __future__ import annotations
 import anthropic
 
 from configs import config
-from llm_utils.errors import OutputTruncatedError
+from llm_utils.errors import OutputTruncatedError, TransientAPIError
 from llm_utils.prompts import REFINE_PROMPT
 from review.prompts import REVIEW_PROMPT
 from usage.usage_log import record_usage
@@ -44,11 +44,17 @@ def _generate(
     client = _get_client()
     model_name = model or "claude-haiku-4-5-20251001"
 
-    response = client.messages.create(
-        model=model_name,
-        max_tokens=config.CLAUDE_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=config.CLAUDE_MAX_OUTPUT_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except (anthropic.OverloadedError, anthropic.InternalServerError) as exc:
+        # 對方伺服器暫時性的問題（529 overloaded_error 最常見，代表 Claude
+        # 那邊當下需求量過大），跟額度用盡是兩回事，通常幾秒到幾十秒內就
+        # 會恢復，值得重試——跟 Gemini 那邊 503 UNAVAILABLE 是同一類問題。
+        raise TransientAPIError(f"{model_name} 伺服器暫時無法處理（{exc}），可能是對方需求量過大") from exc
 
     usage = getattr(response, "usage", None)
     record_usage(

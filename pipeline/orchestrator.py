@@ -28,7 +28,7 @@ from configs import config
 from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
 from llm_utils import claude_client, gemini_client
-from llm_utils.errors import OutputTruncatedError, QuotaExceededError
+from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from ocr_utils.cover_detect import evaluate_cover_page
 from ocr_utils.ocr_engine import ocr_page
 from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
@@ -64,6 +64,7 @@ def _refine_and_correct(
     refined = None
     truncated = False
     quota_exceeded = False
+    transient_error = False
     for attempt in range(1, max_retry + 1):
         try:
             job_manager.append_log(
@@ -94,8 +95,23 @@ def _refine_and_correct(
                 time.sleep(wait_seconds)
             else:
                 job_manager.append_log(job_id, f"批次 {batch_no} {exc}", level="error")
+        except TransientAPIError as exc:
+            # 對方伺服器暫時性問題（不是額度用盡），通常幾秒到幾十秒內
+            # 會恢復，用比 429 短的等待時間重試。
+            transient_error = True
+            if attempt < max_retry:
+                wait_seconds = config.TRANSIENT_RETRY_BASE_DELAY_SECONDS * attempt
+                job_manager.append_log(
+                    job_id,
+                    f"批次 {batch_no} {exc}，等待 {wait_seconds:.0f} 秒後重試（{attempt}/{max_retry}）",
+                    level="warning",
+                )
+                time.sleep(wait_seconds)
+            else:
+                job_manager.append_log(job_id, f"批次 {batch_no} {exc}", level="error")
         except Exception as exc:  # noqa: BLE001
             quota_exceeded = False
+            transient_error = False
             job_manager.append_log(
                 job_id,
                 f"批次 {batch_no} 第 {attempt} 次呼叫失敗：{exc}（{attempt}/{max_retry}）",
@@ -105,6 +121,8 @@ def _refine_and_correct(
     if refined is None:
         if quota_exceeded:
             reason = "額度已用盡"
+        elif transient_error:
+            reason = "對方伺服器暫時無法處理"
         elif truncated:
             reason = "輸出被截斷"
         else:
@@ -113,7 +131,8 @@ def _refine_and_correct(
             job_id,
             f"批次 {batch_no} {reason}，保留 OpenCC 決定性轉換結果（未套用 LLM 潤飾）"
             + ("，建議調小批次頁數重新處理這本書" if truncated else "")
-            + ("，建議換一個 model 或等額度重置後再處理這本書" if quota_exceeded else ""),
+            + ("，建議換一個 model 或等額度重置後再處理這本書" if quota_exceeded else "")
+            + ("，建議稍後重新處理這本書" if transient_error else ""),
             level="warning",
         )
         return traditional_text
