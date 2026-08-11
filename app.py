@@ -10,6 +10,7 @@ import threading
 import time
 from functools import wraps
 
+import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
@@ -156,6 +157,33 @@ def active_jobs():
     沒有人的工作跑到一半」用的，部署腳本／CI 拿不到使用者的 session
     token，而這裡只回一個數字，不洩漏任何內容。"""
     return jsonify({"active": job_store.count_active()})
+
+
+_TEACHER_NOTICE_URL = "https://beethoreven.github.io/zh-cn-to-tw-web/teacher-notice.txt"
+_TEACHER_NOTICE_CACHE_SECONDS = 300
+_teacher_notice_cache: dict = {"text": None, "fetched_at": 0.0}
+
+
+@app.get("/api/teacher-notice")
+def teacher_notice():
+    """「阿舍老師的叮嚀」純文字內容，直接轉發 GitHub Pages 上的
+    teacher-notice.txt（維護者只要編輯改動那份檔案本身、push 即可，
+    不用碰這裡）。刻意不要求登入——這段內容本來就設計成不用登入也看
+    得到。刻意不用桌面版的 file:// 直接讀本機檔案：WKWebView 底下
+    file:// 頁面沒有任何辦法讀取同目錄的另一個檔案（fetch/XHR/iframe
+    實測都被擋下來），改走跟其他 API 一樣的 Render 端點，桌面版跟
+    瀏覽器版共用同一條路徑，也不需要在打包時把內容注入進 App 裡。
+    短時間快取避免每次載入頁面都真的打一次 GitHub Pages。"""
+    now = time.time()
+    if _teacher_notice_cache["text"] is None or now - _teacher_notice_cache["fetched_at"] > _TEACHER_NOTICE_CACHE_SECONDS:
+        try:
+            resp = requests.get(_TEACHER_NOTICE_URL, timeout=5)
+            resp.raise_for_status()
+            _teacher_notice_cache["text"] = resp.text
+            _teacher_notice_cache["fetched_at"] = now
+        except Exception as e:
+            print(f"[teacher-notice] 抓取失敗，沿用舊快取（若有）：{e}", flush=True)
+    return jsonify({"text": _teacher_notice_cache["text"] or ""})
 
 
 @app.post("/auth/login")
