@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from db_utils.connection import LOCK, get_ready_conn, sql
+from db_utils.connection import get_ready_conn, sql
 
 _UTC = ZoneInfo("UTC")
 
@@ -51,28 +51,27 @@ def record_usage(
     file_name: str | None = None,
     project: int | None = None,
 ) -> None:
-    with LOCK:
-        conn, cur = _get_conn()
-        try:
-            cur.execute(
-                _sql(
-                    "INSERT INTO usage_log "
-                    "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name, project) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)"
-                ),
-                (
-                    datetime.now(_UTC).isoformat(),
-                    model,
-                    user_email,
-                    input_tokens,
-                    output_tokens,
-                    file_name,
-                    project,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn, cur = _get_conn()
+    try:
+        cur.execute(
+            _sql(
+                "INSERT INTO usage_log "
+                "(timestamp_utc, model, user_email, input_tokens, output_tokens, file_name, project) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
+            (
+                datetime.now(_UTC).isoformat(),
+                model,
+                user_email,
+                input_tokens,
+                output_tokens,
+                file_name,
+                project,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_today_usage(model: str) -> int:
@@ -83,19 +82,18 @@ def get_today_usage(model: str) -> int:
     start_utc = start_utc_dt.isoformat()
     end_utc = end_utc_dt.isoformat()
 
-    with LOCK:
-        conn, cur = _get_conn()
-        try:
-            cur.execute(
-                _sql(
-                    "SELECT COUNT(*) FROM usage_log "
-                    "WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
-                ),
-                (model, start_utc, end_utc),
-            )
-            return cur.fetchone()[0]
-        finally:
-            conn.close()
+    conn, cur = _get_conn()
+    try:
+        cur.execute(
+            _sql(
+                "SELECT COUNT(*) FROM usage_log "
+                "WHERE model = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
+            ),
+            (model, start_utc, end_utc),
+        )
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
 
 
 def get_today_project_model_count(project_id: int, model: str) -> int:
@@ -109,54 +107,51 @@ def get_today_project_model_count(project_id: int, model: str) -> int:
     start_utc = start_utc_dt.isoformat()
     end_utc = end_utc_dt.isoformat()
 
-    with LOCK:
-        conn, cur = _get_conn()
-        try:
-            cur.execute(
-                _sql(
-                    "SELECT COUNT(*) FROM usage_log "
-                    "WHERE model = ? AND project = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
-                ),
-                (model, project_id, start_utc, end_utc),
-            )
-            return cur.fetchone()[0]
-        finally:
-            conn.close()
+    conn, cur = _get_conn()
+    try:
+        cur.execute(
+            _sql(
+                "SELECT COUNT(*) FROM usage_log "
+                "WHERE model = ? AND project = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
+            ),
+            (model, project_id, start_utc, end_utc),
+        )
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
 
 
 def get_project_token_usage(project_id: int, model: str) -> dict:
     """回傳某個劇本案（project id）累積至今、這個 model 的 input/output
     token 數，不分時間範圍——給主介面「本案使用 Claude token 狀況」用。"""
-    with LOCK:
-        conn, cur = _get_conn()
-        try:
-            cur.execute(
-                _sql(
-                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-                    "FROM usage_log WHERE model = ? AND project = ?"
-                ),
-                (model, project_id),
-            )
-            input_tokens, output_tokens = cur.fetchone()
-            return {"input_tokens": input_tokens, "output_tokens": output_tokens}
-        finally:
-            conn.close()
+    conn, cur = _get_conn()
+    try:
+        cur.execute(
+            _sql(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
+                "FROM usage_log WHERE model = ? AND project = ?"
+            ),
+            (model, project_id),
+        )
+        input_tokens, output_tokens = cur.fetchone()
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    finally:
+        conn.close()
 
 
 def get_total_token_usage(model: str) -> dict:
     """回傳這個 model 從有紀錄以來累積的 input/output token 數，不分時間、
     不分專案——給管理員介面的總使用量用。"""
-    with LOCK:
-        conn, cur = _get_conn()
-        try:
-            cur.execute(
-                _sql(
-                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-                    "FROM usage_log WHERE model = ?"
-                ),
-                (model,),
-            )
-            input_tokens, output_tokens = cur.fetchone()
-            return {"input_tokens": input_tokens, "output_tokens": output_tokens}
-        finally:
-            conn.close()
+    conn, cur = _get_conn()
+    try:
+        cur.execute(
+            _sql(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
+                "FROM usage_log WHERE model = ?"
+            ),
+            (model,),
+        )
+        input_tokens, output_tokens = cur.fetchone()
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    finally:
+        conn.close()

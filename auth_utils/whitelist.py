@@ -21,7 +21,7 @@ import os
 import threading
 import time
 
-from db_utils.connection import LOCK, get_ready_conn, sql
+from db_utils.connection import get_ready_conn, sql
 
 _CACHE_TTL_SECONDS = int(os.environ.get("AUTH_CACHE_TTL_SECONDS", "30"))
 _cache_lock = threading.Lock()
@@ -29,24 +29,23 @@ _cache: dict[str, tuple[float, dict | None]] = {}
 
 
 def _query_user_auth_row(email: str):
-    with LOCK:
-        conn, cur = get_ready_conn()
-        try:
-            # 用 LOWER() 比對，不要求大小寫完全一致——管理員在後台輸入
-            # email 時打的大小寫，不一定跟 Google 這個帳號實際回傳的
-            # email claim 完全一樣，大小寫對不上會讓使用者莫名其妙被
-            # 擋在授權白名單外面，而且從後台看起來像是有把人加進去了
-            cur.execute(
-                sql(
-                    "SELECT users.status, permissions.role FROM users "
-                    "JOIN permissions ON users.role = permissions.id "
-                    "WHERE LOWER(users.email) = LOWER(?)"
-                ),
-                (email,),
-            )
-            return cur.fetchone()
-        finally:
-            conn.close()
+    conn, cur = get_ready_conn()
+    try:
+        # 用 LOWER() 比對，不要求大小寫完全一致——管理員在後台輸入
+        # email 時打的大小寫，不一定跟 Google 這個帳號實際回傳的
+        # email claim 完全一樣，大小寫對不上會讓使用者莫名其妙被
+        # 擋在授權白名單外面，而且從後台看起來像是有把人加進去了
+        cur.execute(
+            sql(
+                "SELECT users.status, permissions.role FROM users "
+                "JOIN permissions ON users.role = permissions.id "
+                "WHERE LOWER(users.email) = LOWER(?)"
+            ),
+            (email,),
+        )
+        return cur.fetchone()
+    finally:
+        conn.close()
 
 
 def get_user_auth_info(email: str | None) -> dict | None:
@@ -91,11 +90,10 @@ def get_user_id(email: str | None) -> int | None:
     get_user_auth_info 那樣需要 TTL 快取。"""
     if not email:
         return None
-    with LOCK:
-        conn, cur = get_ready_conn()
-        try:
-            cur.execute(sql("SELECT id FROM users WHERE LOWER(email) = LOWER(?)"), (email,))
-            row = cur.fetchone()
-            return row[0] if row else None
-        finally:
-            conn.close()
+    conn, cur = get_ready_conn()
+    try:
+        cur.execute(sql("SELECT id FROM users WHERE LOWER(email) = LOWER(?)"), (email,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()

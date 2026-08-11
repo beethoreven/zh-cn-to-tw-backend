@@ -32,7 +32,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from db_utils.connection import LOCK, get_ready_conn, sql
+from db_utils.connection import get_ready_conn, sql
 
 SESSION_IDLE_DAYS = int(os.environ.get("SESSION_IDLE_DAYS", "90"))
 
@@ -54,19 +54,18 @@ def create_session(email: str) -> str:
     這兩件事，呼叫端（/auth/login）負責。"""
     token = secrets.token_hex(32)
     now = _now_iso()
-    with LOCK:
-        conn, cur = get_ready_conn()
-        try:
-            cur.execute(
-                sql(
-                    "INSERT INTO sessions (token, email, created_at, last_seen_at) "
-                    "VALUES (?, ?, ?, ?)"
-                ),
-                (token, email, now, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn, cur = get_ready_conn()
+    try:
+        cur.execute(
+            sql(
+                "INSERT INTO sessions (token, email, created_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?)"
+            ),
+            (token, email, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return token
 
 
@@ -77,26 +76,25 @@ def resolve_session(token: str | None) -> str | None:
     if not token:
         return None
 
-    with LOCK:
-        conn, cur = get_ready_conn()
-        try:
-            cur.execute(sql("SELECT email, last_seen_at FROM sessions WHERE token = ?"), (token,))
-            row = cur.fetchone()
-            if row is None:
-                return None
+    conn, cur = get_ready_conn()
+    try:
+        cur.execute(sql("SELECT email, last_seen_at FROM sessions WHERE token = ?"), (token,))
+        row = cur.fetchone()
+        if row is None:
+            return None
 
-            email, last_seen_at = row
-            last_seen = datetime.fromisoformat(last_seen_at)
-            idle_days = (datetime.now(timezone.utc) - last_seen).total_seconds() / 86400
-            if idle_days > SESSION_IDLE_DAYS:
-                cur.execute(sql("DELETE FROM sessions WHERE token = ?"), (token,))
-                conn.commit()
-                return None
+        email, last_seen_at = row
+        last_seen = datetime.fromisoformat(last_seen_at)
+        idle_days = (datetime.now(timezone.utc) - last_seen).total_seconds() / 86400
+        if idle_days > SESSION_IDLE_DAYS:
+            cur.execute(sql("DELETE FROM sessions WHERE token = ?"), (token,))
+            conn.commit()
+            return None
 
-            _maybe_touch(cur, conn, token)
-            return email
-        finally:
-            conn.close()
+        _maybe_touch(cur, conn, token)
+        return email
+    finally:
+        conn.close()
 
 
 def _maybe_touch(cur, conn, token: str) -> None:
@@ -113,12 +111,11 @@ def _maybe_touch(cur, conn, token: str) -> None:
 def delete_session(token: str | None) -> None:
     if not token:
         return
-    with LOCK:
-        conn, cur = get_ready_conn()
-        try:
-            cur.execute(sql("DELETE FROM sessions WHERE token = ?"), (token,))
-            conn.commit()
-        finally:
-            conn.close()
+    conn, cur = get_ready_conn()
+    try:
+        cur.execute(sql("DELETE FROM sessions WHERE token = ?"), (token,))
+        conn.commit()
+    finally:
+        conn.close()
     with _touch_lock:
         _last_touched.pop(token, None)

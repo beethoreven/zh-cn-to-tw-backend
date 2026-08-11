@@ -1148,10 +1148,11 @@ if __name__ == "__main__":
     # 這段期間如果 Werkzeug 不能同時接其他連線，前端每 1.5 秒一次的
     # 輪詢就會在處理中被卡住、逾時，瀏覽器端看到的就是 net::ERR_FAILED
     # （連 CORS header 都沒有，因為連線根本沒被處理完）。程式碼裡本來
-    # 就已經對所有共用可變狀態加了鎖（db_utils.connection.LOCK、
-    # job_manager/review_manager 各自的 _lock、ocr_engine 的
-    # _ocr_lock），本來就是為了支援並行存取設計的，只是少了這個
-    # threaded=True 讓 Werkzeug 真的並行處理請求，之前一直沒發現。
+    # 就已經對所有共用可變狀態加了鎖（job_manager/review_manager 各自的
+    # _lock、ocr_engine 的 _ocr_lock；資料庫連線改用連線池處理並行，見
+    # db_utils/connection.py 開頭的說明，不再需要額外的鎖），本來就是
+    # 為了支援並行存取設計的，只是少了這個 threaded=True 讓 Werkzeug
+    # 真的並行處理請求，之前一直沒發現。
     #
     # 桌面版 App（DESKTOP_SERVICE=1）：跟 zh-cn-to-tw-ocr-service 同一套
     # 做法——跟作業系統要一個沒人用的空 port、只綁 127.0.0.1（不對外網

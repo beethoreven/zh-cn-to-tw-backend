@@ -14,14 +14,23 @@
 EXISTS、補欄位前先檢查），但只需要在這個 process 生命週期裡成功跑過
 一次，跑第二次結果不會變，卻會對 Postgres（尤其 Neon 這種每次連線都
 有實質延遲的服務）多花時間。第一次呼叫成功後就把旗標打開，之後的
-呼叫直接跳過整段檢查。呼叫端要在 db_utils.connection.LOCK 保護下呼叫
-ensure_schema()，避免多執行緒同時搶著跑初始化。
+呼叫直接跳過整段檢查。
+
+補欄位那幾處是「先查 information_schema 確認欄位不存在、再 ALTER TABLE
+ADD COLUMN」，中間沒有 IF NOT EXISTS 保護，兩個請求在冷啟動時第一次
+同時呼叫 ensure_schema() 會真的搶著跑、可能撞出「欄位已存在」的錯誤
+（不是理論上的風險，是這幾行程式碼本身的寫法就有這個 TOCTOU 空隙）。
+用 _schema_lock 保護，但這把鎖只鎖「跑不跑這段初始化」這個判斷本身，
+一次性、跑完就不會再進來，不是包住每次資料庫存取的那種鎖（那種鎖的
+問題見 db_utils/connection.py 開頭的說明）。
 """
 
 from __future__ import annotations
 
+import threading
 
 _schema_ready = False
+_schema_lock = threading.Lock()
 
 # 預設的角色/額度種子資料——id=1 是管理員（給很高的上限，等同不限制），
 # id=2 是一般使用者（保守的預設值）。這只是「有資料可以動」的起始值，
@@ -44,17 +53,26 @@ def _existing_columns(cur, table: str) -> set[str]:
 
 def ensure_schema(cur) -> None:
     global _schema_ready
+    # 先在鎖外面快速判斷——絕大多數呼叫（process 生命週期裡的第二次
+    # 之後）都是這條路徑，不用每次都付搶鎖的成本。
     if _schema_ready:
         return
 
-    _ensure_permissions(cur)
-    _ensure_users(cur)
-    _ensure_projects(cur)
-    _ensure_usage_log(cur)
-    _ensure_sessions(cur)
-    _ensure_jobs(cur)
+    with _schema_lock:
+        # 鎖內要重新檢查一次：可能在等鎖的這段時間，另一個執行緒已經
+        # 把初始化跑完了（double-checked locking），不重新檢查的話會
+        # 白白把補欄位那幾段再跑一次，撞上前面說的 TOCTOU 錯誤。
+        if _schema_ready:
+            return
 
-    _schema_ready = True
+        _ensure_permissions(cur)
+        _ensure_users(cur)
+        _ensure_projects(cur)
+        _ensure_usage_log(cur)
+        _ensure_sessions(cur)
+        _ensure_jobs(cur)
+
+        _schema_ready = True
 
 
 def _ensure_permissions(cur) -> None:

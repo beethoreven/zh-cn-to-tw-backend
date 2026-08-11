@@ -33,7 +33,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from db_utils.connection import LOCK, get_ready_conn, sql
+from db_utils.connection import get_ready_conn, sql
 
 # 完成/中斷的工作保留多久。使用者可能重整頁面之後才回來下載成果，
 # 所以不能一做完就刪；但也沒必要永久保留（Neon 免費方案容量有限，
@@ -65,22 +65,21 @@ def save(job_id: str, kind: str, status: str, user_email: str | None, payload: d
             _last_write[job_id] = time.time()
 
     try:
-        with LOCK:
-            conn, cur = get_ready_conn()
-            try:
-                cur.execute(
-                    sql(
-                        "INSERT INTO jobs (id, kind, user_email, status, payload, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT (id) DO UPDATE SET "
-                        "status = EXCLUDED.status, payload = EXCLUDED.payload, "
-                        "updated_at = EXCLUDED.updated_at"
-                    ),
-                    (job_id, kind, user_email, status, json.dumps(payload), _now_iso(), _now_iso()),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(
+                sql(
+                    "INSERT INTO jobs (id, kind, user_email, status, payload, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "status = EXCLUDED.status, payload = EXCLUDED.payload, "
+                    "updated_at = EXCLUDED.updated_at"
+                ),
+                (job_id, kind, user_email, status, json.dumps(payload), _now_iso(), _now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         # 持久化失敗絕對不能讓正在跑的工作掛掉——這一層是「額外的保險」，
         # 不是主要流程。最壞情況只是這次重啟後救不回來，跟沒有這層一樣，
@@ -91,13 +90,12 @@ def save(job_id: str, kind: str, status: str, user_email: str | None, payload: d
 def load(job_id: str) -> dict | None:
     """從 Neon 撈回狀態。只有記憶體裡找不到時才會走到這裡。"""
     try:
-        with LOCK:
-            conn, cur = get_ready_conn()
-            try:
-                cur.execute(sql("SELECT payload, status FROM jobs WHERE id = ?"), (job_id,))
-                row = cur.fetchone()
-            finally:
-                conn.close()
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(sql("SELECT payload, status FROM jobs WHERE id = ?"), (job_id,))
+            row = cur.fetchone()
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         return None
 
@@ -115,21 +113,20 @@ def load(job_id: str) -> dict | None:
 def mark_running_as_interrupted() -> int:
     """process 啟動時呼叫，見模組說明第 3 點。回傳被標記的筆數。"""
     try:
-        with LOCK:
-            conn, cur = get_ready_conn()
-            try:
-                cur.execute(
-                    sql(
-                        "UPDATE jobs SET status = 'interrupted', updated_at = ? "
-                        "WHERE status IN ('pending', 'running')"
-                    ),
-                    (_now_iso(),),
-                )
-                count = cur.rowcount
-                conn.commit()
-                return count
-            finally:
-                conn.close()
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(
+                sql(
+                    "UPDATE jobs SET status = 'interrupted', updated_at = ? "
+                    "WHERE status IN ('pending', 'running')"
+                ),
+                (_now_iso(),),
+            )
+            count = cur.rowcount
+            conn.commit()
+            return count
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         return 0
 
@@ -138,15 +135,14 @@ def delete_expired() -> int:
     """刪掉超過保留期的紀錄。"""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=RETENTION_HOURS)).isoformat()
     try:
-        with LOCK:
-            conn, cur = get_ready_conn()
-            try:
-                cur.execute(sql("DELETE FROM jobs WHERE updated_at < ?"), (cutoff,))
-                count = cur.rowcount
-                conn.commit()
-                return count
-            finally:
-                conn.close()
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute(sql("DELETE FROM jobs WHERE updated_at < ?"), (cutoff,))
+            count = cur.rowcount
+            conn.commit()
+            return count
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         return 0
 
@@ -155,12 +151,11 @@ def count_active() -> int:
     """目前有幾個工作正在跑。給「部署前先確認沒有工作在進行」用
     （見 /api/jobs/active）。"""
     try:
-        with LOCK:
-            conn, cur = get_ready_conn()
-            try:
-                cur.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'running')")
-                return cur.fetchone()[0]
-            finally:
-                conn.close()
+        conn, cur = get_ready_conn()
+        try:
+            cur.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'running')")
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001
         return 0
