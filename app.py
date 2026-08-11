@@ -158,11 +158,11 @@ def active_jobs():
     return jsonify({"active": job_store.count_active()})
 
 
-_TEACHER_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "ta-notice.txt")
+_TA_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "ta-notice.txt")
 
 
-@app.get("/api/teacher-notice")
-def teacher_notice():
+@app.get("/api/ta-notice")
+def ta_notice():
     """「阿舍老師的叮嚀」純文字內容，直接讀這個 repo 根目錄的
     ta-notice.txt（維護者編輯那份檔案、commit、push、在 Render
     手動觸發部署即可生效，不用碰程式邏輯）。刻意不要求登入——這段
@@ -171,7 +171,7 @@ def teacher_notice():
     另一個檔案（fetch/XHR/iframe 實測都被擋下來），改走跟其他 API
     一樣的 Render 端點，桌面版跟瀏覽器版共用同一條路徑。"""
     try:
-        with open(_TEACHER_NOTICE_PATH, encoding="utf-8") as f:
+        with open(_TA_NOTICE_PATH, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
         text = ""
