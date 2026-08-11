@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import os
+import socket
+import sys
 import threading
 from functools import wraps
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 from admin_utils import permissions as admin_permissions
@@ -824,9 +826,8 @@ def _require_role_id(raw_value) -> int:
 
 def _require_owner_id(raw_value) -> int:
     """驗證負責人 ID 指向一個真的存在的使用者，不要只驗證「是不是數字」
-    就直接寫進 DB——SQLite 本機開發預設不強制 FK 限制，一個不存在的
-    owner id 會悄悄寫成功，只有 Postgres 正式環境才會因為 FK 違反而
-    噴錯，兩邊行為會兜不起來，且噴出來的還是沒被接住的 500。"""
+    就直接寫進 DB——不然一個不存在的 owner id 會一路送到資料庫，才因為
+    外鍵違反而噴錯，而且噴出來的是沒被接住的 500，不是清楚的錯誤訊息。"""
     try:
         owner_id = int(raw_value)
     except (TypeError, ValueError):
@@ -1012,6 +1013,37 @@ def admin_update_project(project_id):
     return jsonify({"changed": changed, "project": admin_projects.get_project(project_id)})
 
 
+# --- 前端靜態檔案 ---
+# 桌面版 App 把整份 zh-cn-to-tw-web 前端包進 .app，由這支 backend 自己
+# 一併供應，不再從 GitHub Pages 線上抓（見 config.WEB_STATIC_DIR 說明）。
+# 這樣網頁跟 API 變成同一個 origin，連 CORS 都不需要了。
+# WEB_STATIC_DIR 沒設定時這兩支路由一律 404，純 API 模式行為不變。
+
+
+@app.get("/")
+def serve_index():
+    if not config.WEB_STATIC_DIR:
+        return jsonify({"error": "這個部署沒有供應前端檔案"}), 404
+    return send_from_directory(config.WEB_STATIC_DIR, "index.html")
+
+
+@app.get("/<path:filename>")
+def serve_web_asset(filename):
+    """前端的 script.js/style.css/favicon.png/teacher-notice.txt 等等。
+    這條路由帶 <path:> 轉換器，是所有路由裡最不精確的一條，Werkzeug 會
+    優先比對其他明確寫死的路由（/api/..., /auth/..., /admin/...），不會
+    把 API 請求吃掉。send_from_directory 本身會擋掉 ../ 這類路徑穿越。"""
+    if not config.WEB_STATIC_DIR:
+        return jsonify({"error": "這個部署沒有供應前端檔案"}), 404
+    return send_from_directory(config.WEB_STATIC_DIR, filename)
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 if __name__ == "__main__":
     # 預設關閉 debug 模式——Werkzeug 的互動除錯器一旦在正式環境被觸發，
     # 會把完整 stack trace、原始碼路徑暴露給任何看得到錯誤頁面的人，
@@ -1027,4 +1059,17 @@ if __name__ == "__main__":
     # job_manager/review_manager 各自的 _lock、ocr_engine 的
     # _ocr_lock），本來就是為了支援並行存取設計的，只是少了這個
     # threaded=True 讓 Werkzeug 真的並行處理請求，之前一直沒發現。
-    app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False, threaded=True)
+    #
+    # 桌面版 App（DESKTOP_SERVICE=1）：跟 zh-cn-to-tw-ocr-service 同一套
+    # 做法——跟作業系統要一個沒人用的空 port、只綁 127.0.0.1（不對外網
+    # 開放，這是使用者自己機器上的服務）、把實際拿到的 port 印到 stdout
+    # 給 Swift 殼讀取。絕不寫死 port，這個專案吃過太多次「舊 process 卡住
+    # 固定 port」的虧。其他情況（例如 Render 部署）維持原本的 0.0.0.0:5001。
+    desktop_service = os.environ.get("DESKTOP_SERVICE", "").lower() in ("1", "true")
+    if desktop_service:
+        port = int(os.environ.get("BACKEND_PORT", "0")) or _find_free_port()
+        print(f"BACKEND_PORT={port}", flush=True)
+        sys.stdout.flush()
+        app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False, threaded=True)
+    else:
+        app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False, threaded=True)

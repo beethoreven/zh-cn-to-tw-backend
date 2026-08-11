@@ -29,9 +29,6 @@ from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
 from llm_utils import claude_client, gemini_client
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
-from ocr_utils.cover_detect import evaluate_cover_page
-from ocr_utils.ocr_engine import ocr_page
-from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
 from output_utils.text_normalize import normalize_paragraph_breaks
 from validators.simplified_check import find_residual_simplified
 
@@ -167,7 +164,18 @@ def _refine_and_correct(
 def run_ocr_stage(job_id: str, pdf_path: str, dpi: int, detect_cover: bool) -> tuple[list[str], int]:
     """封面偵測（可選）+ 逐頁 OCR，回傳 (每頁文字, 實際頁數)。桌面版 App
     會在使用者本機端做這一段（見 zh-cn-to-tw-ocr-service），伺服器端的
-    正常上傳流程則由 run_pipeline 呼叫這裡，兩條路徑共用同一份邏輯。"""
+    正常上傳流程則由 run_pipeline 呼叫這裡，兩條路徑共用同一份邏輯。
+
+    ocr_utils 這幾個 import 刻意放在函式裡面、不放模組最上面：它們會把
+    PaddleOCR/PaddlePaddle/PyMuPDF 整包拉進來（光 paddle 就約 600MB）。
+    桌面版 App 把這支 backend 一起打包進 .app 時，OCR 是由旁邊獨立的
+    zh-cn-to-tw-ocr-service 負責、這個函式永遠不會被呼叫到，模組層級的
+    import 會讓 PyInstaller 把這些完全用不到的東西也打包進去，白白多出
+    數百 MB。放在函式內就只有真的走伺服器端上傳流程時才會載入。"""
+    from ocr_utils.cover_detect import evaluate_cover_page
+    from ocr_utils.ocr_engine import ocr_page
+    from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
+
     job_manager.append_log(job_id, "開始將 PDF 轉成頁面圖片")
     # total_pages 用便宜的方式單獨查（不渲染任何一頁），page_images
     # 則是逐頁 yield 的產生器——不要把整份 PDF 的每一頁圖片同時留在

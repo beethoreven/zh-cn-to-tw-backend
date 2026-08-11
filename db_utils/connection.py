@@ -1,58 +1,54 @@
 """
 全站共用的資料庫連線層。
 
-跟 usage_log 原本各管各的連線邏輯不一樣——現在有 usage_log、users、
-permissions、projects 四張表要管，所有需要碰資料庫的模組（usage/、
-admin_utils/、auth_utils/）都共用同一套連線/方言轉換邏輯，不要每個
-模組各自複製一份 SQLite/Postgres 雙模式的判斷。
+usage_log、users、permissions、projects、sessions 這幾張表都走這裡，
+所有需要碰資料庫的模組（usage/、admin_utils/、auth_utils/）共用同一套
+連線邏輯，不要每個模組各自複製一份。
 
-規則跟原本 usage_log 一樣：本機開發預設用 SQLite（跟這支程式同一個
-repo 根目錄的 usage.db），設定 DATABASE_URL 環境變數就改連 Postgres
-（正式環境用 Neon，因為 Render 免費方案的檔案系統非持久性）。
+一律連 Postgres（正式用 Neon），不再支援 SQLite 雙模式：桌面版 App 跟
+Render 都是連同一個 Neon 資料庫，本機開發也是，只有一種資料來源，
+不會再有「本機測起來好好的、上線卻是另一份資料」這種落差。
 
-所有呼叫端都要在 LOCK 保護下呼叫 get_conn()，避免 SQLite 同時多個
-連線寫入的問題，Postgres 這邊雖然不是必要，但統一用同一個鎖，邏輯
-簡單、也不會有效能瓶頸（這個工具的呼叫量很小）。
+所有呼叫端都要在 LOCK 保護下取得連線。這個工具的呼叫量很小，統一用
+同一個鎖邏輯簡單，也不會有效能瓶頸。
 """
 
 from __future__ import annotations
 
-import os
-import sqlite3
 import threading
-from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "usage.db"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-USE_POSTGRES = bool(DATABASE_URL)
+# 一定要透過 configs.config 讀，不要在這裡直接讀 os.environ——這支模組
+# 會在 app.py 最上面就被間接 import（admin_utils/auth_utils 都會用到），
+# 時間點比 config 的 load_dotenv() 早，直接讀 os.environ 會讀不到 .env
+# 裡的值。詳細說明見 configs/config.py 的 DATABASE_URL。
+from configs import config
+
+DATABASE_URL = config.DATABASE_URL
 
 LOCK = threading.Lock()
 
 
 def sql(query: str) -> str:
-    """SQLite 用 `?` 佔位符寫查詢語法(單一事實來源)，這裡在 Postgres 模式
-    下轉成 `%s`，避免每條查詢都要維護兩份幾乎一樣的字串。"""
-    return query.replace("?", "%s") if USE_POSTGRES else query
+    """查詢語法統一用 `?` 佔位符撰寫（單一事實來源），這裡轉成 psycopg2
+    要的 `%s`。保留這層轉換是為了不用把散落在各模組、已經驗證過的查詢
+    字串全部改寫一遍。"""
+    return query.replace("?", "%s")
 
 
 def get_conn():
     """回傳 (conn, cur)，不做任何 schema 檢查/建立——schema 的事由
     db_utils.schema.ensure_schema() 統一負責，且只在 process 生命週期裡
-    做一次。SQLite 模式下 conn 跟 cur 是分開的物件(這裡統一都用
-    conn.cursor() 拿 cur，兩種模式呼叫端寫法一致)；Postgres 模式下一樣。
-    呼叫端一律用 cur.execute(...) 查詢、conn.commit()/conn.close() 管理
-    連線。"""
-    if USE_POSTGRES:
-        import psycopg2
+    做一次。"""
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "環境變數 DATABASE_URL 未設定，無法連線資料庫。"
+            "本機開發請在 zh-cn-to-tw-backend/.env 填入 Neon 連線字串；"
+            "桌面版 App 則是打包時把 .env 一起放進執行檔旁邊。"
+        )
 
-        conn = psycopg2.connect(DATABASE_URL)
-    else:
-        conn = sqlite3.connect(DB_PATH)
-        # SQLite 預設不強制 FOREIGN KEY 限制，要每個連線自己開啟，
-        # 不然 users.role/projects.owner 這類 FK 欄位可以悄悄寫入
-        # 不存在的 id，跟正式環境 Postgres 的行為兜不起來
-        conn.execute("PRAGMA foreign_keys = ON")
+    import psycopg2
 
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     return conn, cur
 
