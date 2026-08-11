@@ -12,10 +12,13 @@ Gemini/Claude 呼叫使用量記錄。
 3. Stage 3 加上登入後，只要用既有的 user_email 欄位就能做到「每人分開
    統計」，不用改表結構、不用做資料遷移。
 
-「今天」（Gemini 用）採用官方文件講的額度重置時區——美西時間
-（America/Los_Angeles）。Claude 沒有 Gemini 那種免費 RPD，這裡記的是
-token 數/估計費用，統計範圍是「整個專案累積至今」或「全站累積至今」，
-不分時間週期，都用 zoneinfo 處理「今天」這部分，不必自己手動換算日光節約。
+「今天」（Gemini 用）採用 UTC 午夜當界線。Google 官方文件字面上寫的是
+「美西午夜重置」，但實測發現對不起來——台灣時間下午 2 點（UTC 早上 6
+點）額度已經重置，而美西時間（考慮夏令時間）那時候還沒到午夜，換算下來
+UTC 午夜才是實際吻合的界線（且 Google 官方支援論壇也有其他人回報美西
+午夜之後沒有準時重置的狀況，文件講的時區不完全可信）。Claude 沒有
+Gemini 那種免費 RPD，這裡記的是 token 數/估計費用，統計範圍是「整個
+專案累積至今」或「全站累積至今」，不分時間週期，不受這裡影響。
 
 注意：這裡記的是「這個工具打了幾次/用了多少 token」，跟 Google/Anthropic
 官方帳務是兩回事——如果同一把 API key 也在別處使用，這裡的數字會跟
@@ -29,7 +32,6 @@ from zoneinfo import ZoneInfo
 
 from db_utils.connection import LOCK, get_ready_conn, sql
 
-_RESET_TZ = ZoneInfo("America/Los_Angeles")
 _UTC = ZoneInfo("UTC")
 
 
@@ -74,12 +76,12 @@ def record_usage(
 
 
 def get_today_usage(model: str) -> int:
-    """回傳「今天」（美西時區）這個 model 被呼叫過幾次。"""
-    now_local = datetime.now(_RESET_TZ)
-    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + timedelta(days=1)
-    start_utc = start_local.astimezone(_UTC).isoformat()
-    end_utc = end_local.astimezone(_UTC).isoformat()
+    """回傳「今天」（UTC 午夜為界，見檔案開頭說明）這個 model 被呼叫過幾次。"""
+    now_utc = datetime.now(_UTC)
+    start_utc_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_utc_dt = start_utc_dt + timedelta(days=1)
+    start_utc = start_utc_dt.isoformat()
+    end_utc = end_utc_dt.isoformat()
 
     with LOCK:
         conn, cur = _get_conn()
@@ -97,15 +99,15 @@ def get_today_usage(model: str) -> int:
 
 
 def get_today_project_model_count(project_id: int, model: str) -> int:
-    """回傳「今天」（美西時區，跟 get_today_usage 同一套時區規則）某個
+    """回傳「今天」（UTC 午夜為界，跟 get_today_usage 同一套規則）某個
     專案底下，這個 model 被呼叫過幾次——給「個人專案」的 Gemini 3.6
     Flash 每日額度限制用，跟 get_today_usage 的差別只在多加了 project
     這個過濾條件。"""
-    now_local = datetime.now(_RESET_TZ)
-    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + timedelta(days=1)
-    start_utc = start_local.astimezone(_UTC).isoformat()
-    end_utc = end_local.astimezone(_UTC).isoformat()
+    now_utc = datetime.now(_UTC)
+    start_utc_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_utc_dt = start_utc_dt + timedelta(days=1)
+    start_utc = start_utc_dt.isoformat()
+    end_utc = end_utc_dt.isoformat()
 
     with LOCK:
         conn, cur = _get_conn()

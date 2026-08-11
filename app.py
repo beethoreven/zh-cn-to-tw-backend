@@ -293,7 +293,7 @@ def get_options():
 @app.get("/api/usage")
 @require_auth
 def get_usage():
-    """回傳每個 model 今天（美西時區）已用次數與每日上限。"""
+    """回傳每個 model 今天（UTC 午夜為界，見 usage/usage_log.py 說明）已用次數與每日上限。"""
     return jsonify(
         {
             model: {
