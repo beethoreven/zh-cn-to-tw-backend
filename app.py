@@ -158,13 +158,13 @@ def active_jobs():
     return jsonify({"active": job_store.count_active()})
 
 
-_TEACHER_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "teacher-notice.txt")
+_TEACHER_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "ta-notice.txt")
 
 
 @app.get("/api/teacher-notice")
 def teacher_notice():
     """「阿舍老師的叮嚀」純文字內容，直接讀這個 repo 根目錄的
-    teacher-notice.txt（維護者編輯那份檔案、commit、push、在 Render
+    ta-notice.txt（維護者編輯那份檔案、commit、push、在 Render
     手動觸發部署即可生效，不用碰程式邏輯）。刻意不要求登入——這段
     內容本來就設計成不用登入也看得到。刻意不用桌面版的 file:// 直接
     讀本機檔案：WKWebView 底下 file:// 頁面沒有任何辦法讀取同目錄的
@@ -1122,7 +1122,7 @@ def serve_index():
 
 @app.get("/<path:filename>")
 def serve_web_asset(filename):
-    """前端的 script.js/style.css/favicon.png/teacher-notice.txt 等等。
+    """前端的 script.js/style.css/favicon.png 等等。
     這條路由帶 <path:> 轉換器，是所有路由裡最不精確的一條，Werkzeug 會
     優先比對其他明確寫死的路由（/api/..., /auth/..., /admin/...），不會
     把 API 請求吃掉。send_from_directory 本身會擋掉 ../ 這類路徑穿越。"""
