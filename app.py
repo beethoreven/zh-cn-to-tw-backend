@@ -10,7 +10,6 @@ import threading
 import time
 from functools import wraps
 
-import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
@@ -159,31 +158,24 @@ def active_jobs():
     return jsonify({"active": job_store.count_active()})
 
 
-_TEACHER_NOTICE_URL = "https://beethoreven.github.io/zh-cn-to-tw-web/teacher-notice.txt"
-_TEACHER_NOTICE_CACHE_SECONDS = 300
-_teacher_notice_cache: dict = {"text": None, "fetched_at": 0.0}
+_TEACHER_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "teacher-notice.txt")
 
 
 @app.get("/api/teacher-notice")
 def teacher_notice():
-    """「阿舍老師的叮嚀」純文字內容，直接轉發 GitHub Pages 上的
-    teacher-notice.txt（維護者只要編輯改動那份檔案本身、push 即可，
-    不用碰這裡）。刻意不要求登入——這段內容本來就設計成不用登入也看
-    得到。刻意不用桌面版的 file:// 直接讀本機檔案：WKWebView 底下
-    file:// 頁面沒有任何辦法讀取同目錄的另一個檔案（fetch/XHR/iframe
-    實測都被擋下來），改走跟其他 API 一樣的 Render 端點，桌面版跟
-    瀏覽器版共用同一條路徑，也不需要在打包時把內容注入進 App 裡。
-    短時間快取避免每次載入頁面都真的打一次 GitHub Pages。"""
-    now = time.time()
-    if _teacher_notice_cache["text"] is None or now - _teacher_notice_cache["fetched_at"] > _TEACHER_NOTICE_CACHE_SECONDS:
-        try:
-            resp = requests.get(_TEACHER_NOTICE_URL, timeout=5)
-            resp.raise_for_status()
-            _teacher_notice_cache["text"] = resp.text
-            _teacher_notice_cache["fetched_at"] = now
-        except Exception as e:
-            print(f"[teacher-notice] 抓取失敗，沿用舊快取（若有）：{e}", flush=True)
-    return jsonify({"text": _teacher_notice_cache["text"] or ""})
+    """「阿舍老師的叮嚀」純文字內容，直接讀這個 repo 根目錄的
+    teacher-notice.txt（維護者編輯那份檔案、commit、push、在 Render
+    手動觸發部署即可生效，不用碰程式邏輯）。刻意不要求登入——這段
+    內容本來就設計成不用登入也看得到。刻意不用桌面版的 file:// 直接
+    讀本機檔案：WKWebView 底下 file:// 頁面沒有任何辦法讀取同目錄的
+    另一個檔案（fetch/XHR/iframe 實測都被擋下來），改走跟其他 API
+    一樣的 Render 端點，桌面版跟瀏覽器版共用同一條路徑。"""
+    try:
+        with open(_TEACHER_NOTICE_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    return jsonify({"text": text})
 
 
 @app.post("/auth/login")
