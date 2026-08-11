@@ -52,6 +52,7 @@ def ensure_schema(cur) -> None:
     _ensure_projects(cur)
     _ensure_usage_log(cur)
     _ensure_sessions(cur)
+    _ensure_jobs(cur)
 
     _schema_ready = True
 
@@ -149,3 +150,27 @@ def _ensure_sessions(cur) -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at)")
+
+
+def _ensure_jobs(cur) -> None:
+    # Stage 1 潤飾 job 與 Stage 2 校對共用這張表（用 kind 區分）。狀態
+    # 整包存成 JSONB，因為 job_manager/review_manager 本來就是操作一個
+    # dict，序列化整包最單純，不用為了兩種工作各自維護一組欄位。
+    # 詳細設計說明見 db_utils/job_store.py。
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            user_email TEXT,
+            status TEXT NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    # 清理過期紀錄（updated_at < 24 小時前）與「目前有幾個工作在跑」
+    # 都會掃這兩個欄位
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")

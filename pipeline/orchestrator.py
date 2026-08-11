@@ -312,6 +312,11 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
         final_text = normalize_paragraph_breaks(final_text)
         refined_chunks.append(final_text)
 
+        # 每批完成就把「目前為止的成果」存起來（會一路寫進 Neon）。
+        # 伺服器如果在下一批中途重啟，使用者至少救得回這裡為止的結果，
+        # 不用把已經花掉的 LLM 費用整份重跑一次。
+        job_manager.set_partial_result(job_id, "\n\n".join(refined_chunks))
+
         # 批次之間固定停一下，降低短時間內連續打太密集撞到 RPM 上限
         # 的機率；最後一批不用等（後面沒有下一次呼叫了），額度已確定
         # 用盡、後面都不再呼叫 LLM 的情況也不用等（這個延遲本來就是為了

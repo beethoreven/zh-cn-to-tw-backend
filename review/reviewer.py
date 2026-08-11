@@ -246,6 +246,10 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
                 finding["batch"] = batch_no
             all_findings.extend(findings)
 
+            # 每批完成就存目前為止的建議（會一路寫進 Neon），伺服器中途
+            # 重啟時使用者才救得回已經花錢算出來的部分
+            review_manager.set_partial_findings(review_id, list(all_findings))
+
             # 批次之間固定停一下，降低短時間內連續打太密集撞到 RPM 上限
             # 的機率；最後一批不用等（後面沒有下一次呼叫了），額度已確定
             # 用盡、後面都不再呼叫 LLM 的情況也不用等

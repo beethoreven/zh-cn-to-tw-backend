@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from functools import wraps
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -17,6 +18,7 @@ from admin_utils import projects as admin_projects
 from admin_utils import users as admin_users
 from auth_utils import auth, sessions, whitelist
 from configs import config
+from db_utils import job_store
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
 from pipeline.orchestrator import run_pipeline, run_refine_only_pipeline
@@ -56,11 +58,38 @@ CORS(
 
 os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 
+
+def _startup_recover_jobs() -> None:
+    """process 啟動時，把資料庫裡還停在 pending/running 的工作標成
+    interrupted。這個 process 是新起來的，照定義不可能還有執行緒在跑
+    那些工作——不標記的話，前端會永遠看到「執行中」而不會跳出重試
+    對話窗，變成無聲卡死。詳見 db_utils/job_store.py 的說明。
+
+    在背景執行緒做：這一步要連 Neon（冷啟動可能近 10 秒），不能擋住
+    web server 開始接受連線。"""
+    def run():
+        count = job_store.mark_running_as_interrupted()
+        if count:
+            print(f"[startup] 已將 {count} 筆未完成的工作標記為中斷", flush=True)
+        while True:
+            removed = job_store.delete_expired()
+            if removed:
+                print(f"[cleanup] 已清除 {removed} 筆超過保留期的工作紀錄", flush=True)
+            time.sleep(3600)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+_startup_recover_jobs()
+
 STATUS_LABELS = {
     "pending": "等待中",
     "running": "執行中",
     "done": "已完成",
     "failed": "失敗",
+    # 伺服器重啟（部署或平台搬機器）導致工作中途被打斷。前端看到這個
+    # 狀態會跳出重試／結束對話窗，見 db_utils/job_store.py 的說明。
+    "interrupted": "已中斷",
 }
 
 
@@ -113,6 +142,14 @@ def require_admin(view_func):
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.get("/api/jobs/active")
+def active_jobs():
+    """目前有幾個工作正在跑。刻意不要求登入：這支是給「部署前先確認
+    沒有人的工作跑到一半」用的，部署腳本／CI 拿不到使用者的 session
+    token，而這裡只回一個數字，不洩漏任何內容。"""
+    return jsonify({"active": job_store.count_active()})
 
 
 @app.post("/auth/login")
@@ -530,8 +567,24 @@ def get_job(job_id):
             "logs": job["logs"],
             "error": job["error"],
             "has_result": job["result_text"] is not None,
+            # 工作被中斷時，前端要知道還有沒有部分成果可以收尾
+            "has_partial": bool(job.get("partial_text")),
         }
     )
+
+
+@app.post("/api/jobs/<job_id>/finalize")
+@require_auth
+def finalize_job(job_id):
+    """工作被伺服器重啟打斷後，使用者選「結束此階段工作」時呼叫：
+    把中斷前已經完成的批次成果當成最終結果收尾，讓他至少能把做到一半
+    （而且已經付費）的東西下載出來，不必整份重跑。"""
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
+    if not job_manager.finalize_with_partial(job_id):
+        return jsonify({"error": "這個工作沒有任何已完成的部分可以保留"}), 409
+    return jsonify({"status": "done"})
 
 
 def _basename_from_original(original_filename: str | None, fallback: str) -> str:
@@ -754,8 +807,22 @@ def get_review(review_id):
             "error": review["error"],
             "findings": review["findings"],
             "has_applied": review["applied_text"] is not None,
+            "has_partial": bool(review.get("partial_findings")),
         }
     )
+
+
+@app.post("/api/reviews/<review_id>/finalize")
+@require_auth
+def finalize_review(review_id):
+    """校對被伺服器重啟打斷後，使用者選「結束此階段工作」時呼叫：
+    把中斷前已經校對出來的建議當成最終結果收尾（比照 finalize_job）。"""
+    review, err = _get_owned_review(review_id)
+    if err:
+        return err
+    if not review_manager.finalize_with_partial(review_id):
+        return jsonify({"error": "這次校對沒有任何已完成的部分可以保留"}), 409
+    return jsonify({"status": "done"})
 
 
 @app.post("/api/reviews/<review_id>/apply")

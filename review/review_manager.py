@@ -1,5 +1,6 @@
 """
-Stage 2 校對 job 的記憶體內狀態管理，架構上比照 jobs/job_manager.py。
+Stage 2 校對 job 的狀態管理，架構上比照 jobs/job_manager.py：記憶體是
+主要讀取路徑，Neon 是重啟後的復原路徑（見 db_utils/job_store.py）。
 
 除了 log/status 之外，這裡多存了 source_text 跟 chunk_offsets——
 套用使用者勾選的修改時，需要知道每筆建議是從原文的哪一段切出來的，
@@ -12,8 +13,23 @@ import threading
 import time
 import uuid
 
+from db_utils import job_store
+
 _lock = threading.Lock()
 _reviews = {}
+
+_KIND = "review"
+
+
+def _persist(review_id: str, *, force: bool = True) -> None:
+    with _lock:
+        review = _reviews.get(review_id)
+        snapshot = dict(review) if review else None
+    if snapshot is None:
+        return
+    job_store.save(
+        review_id, _KIND, snapshot["status"], snapshot.get("user_email"), snapshot, force=force
+    )
 
 
 def create_review(
@@ -42,13 +58,18 @@ def create_review(
             "created_at": time.time(),
             "user_email": user_email,
         }
+    _persist(review_id)
     return review_id
 
 
 def get_review(review_id: str) -> dict | None:
     with _lock:
         review = _reviews.get(review_id)
-        return dict(review) if review else None
+        if review is not None:
+            return dict(review)
+    # 記憶體裡沒有：可能是重啟後的新 process，回頭查資料庫（啟動時已經
+    # 把未完成的標成 interrupted，前端才知道要跳重試對話窗）
+    return job_store.load(review_id)
 
 
 def append_log(review_id: str, message: str, level: str = "info"):
@@ -57,6 +78,7 @@ def append_log(review_id: str, message: str, level: str = "info"):
         if review is None:
             return
         review["logs"].append({"time": time.time(), "level": level, "message": message})
+    _persist(review_id, force=False)
 
 
 def set_status(review_id: str, status: str):
@@ -65,6 +87,18 @@ def set_status(review_id: str, status: str):
         if review is None:
             return
         review["status"] = status
+    _persist(review_id)
+
+
+def set_partial_findings(review_id: str, findings: list[dict]):
+    """每批校對完就呼叫。中斷時使用者才救得回已經花錢算出來的建議
+    （比照 job_manager.set_partial_result）。"""
+    with _lock:
+        review = _reviews.get(review_id)
+        if review is None:
+            return
+        review["partial_findings"] = findings
+    _persist(review_id)
 
 
 def set_chunk_offsets(review_id: str, chunk_offsets: list[tuple[int, int]]):
@@ -73,6 +107,7 @@ def set_chunk_offsets(review_id: str, chunk_offsets: list[tuple[int, int]]):
         if review is None:
             return
         review["chunk_offsets"] = chunk_offsets
+    _persist(review_id)
 
 
 def set_findings(review_id: str, findings: list[dict]):
@@ -84,6 +119,7 @@ def set_findings(review_id: str, findings: list[dict]):
             finding["id"] = idx
         review["findings"] = findings
         review["status"] = "done"
+    _persist(review_id)
 
 
 def set_error(review_id: str, error: str):
@@ -93,6 +129,7 @@ def set_error(review_id: str, error: str):
             return
         review["error"] = error
         review["status"] = "failed"
+    _persist(review_id)
 
 
 def set_applied_text(review_id: str, text: str):
@@ -153,3 +190,30 @@ def apply_selected(review_id: str, selected_ids: set[int]) -> str:
 
     pieces.append(source_text[prev_end:])
     return "".join(pieces)
+
+
+def finalize_with_partial(review_id: str) -> bool:
+    """使用者在中斷對話窗選「結束此階段工作」時呼叫：把中斷前已經校對出來
+    的建議當成最終結果收尾。回傳是否真的有東西可以收。"""
+    review = get_review(review_id)
+    if review is None:
+        return False
+    partial = review.get("partial_findings") or review.get("findings") or []
+    if not partial:
+        return False
+
+    for idx, finding in enumerate(partial):
+        finding["id"] = idx
+
+    with _lock:
+        if review_id not in _reviews:
+            _reviews[review_id] = review
+        _reviews[review_id]["findings"] = partial
+        _reviews[review_id]["status"] = "done"
+        _reviews[review_id]["logs"].append({
+            "time": time.time(),
+            "level": "warning",
+            "message": "校對中途被伺服器重啟打斷，已改用中斷前完成的部分建議收尾",
+        })
+    _persist(review_id)
+    return True
