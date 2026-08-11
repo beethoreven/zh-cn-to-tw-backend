@@ -36,6 +36,11 @@ app = Flask(__name__)
 
 # 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
 # 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
+# "null" 是桌面版 App：網頁前端現在用 file:// 直接從 .app 裡載入（不再
+# 透過本機 HTTP 伺服器供應——原因見 zh-cn-to-tw-mac 的 ContentView.swift），
+# 瀏覽器對 file:// 頁面發出的跨來源請求，Origin header 的值就是字面上
+# 的 "null"，不是空字串也不是省略，這裡要明確放行，不然桌面版 App 打
+# 任何 API 都會被 CORS 擋下來。
 # allow_headers 要明確帶 Authorization——登入後每次 API 呼叫都會帶
 # `Authorization: Bearer <session token>`（見 auth_utils/sessions.py：
 # 這是應用程式自己簽發的長效憑證，不是 Google ID Token 本身，Google
@@ -51,6 +56,7 @@ CORS(
         "https://beethoreven.github.io",
         r"http://localhost:\d+",
         r"http://127\.0\.0\.1:\d+",
+        "null",
     ],
     allow_headers=["Content-Type", "Authorization"],
     expose_headers=["Content-Disposition"],
