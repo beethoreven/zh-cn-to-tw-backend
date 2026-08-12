@@ -52,32 +52,6 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 
 **曾經考慮過、後來放棄的方案**:讓桌面版把整支 backend 也一起打包進 .app（`packaging/backend_service.spec`，已刪除），本機自己跑一份完整的 backend。放棄原因是本機 backend 用 HTTP 供應網頁時，監聽的 port 是每次啟動隨機配的（刻意避免舊 process 卡住固定 port），而 `localStorage` 是照 `scheme+host+port` 算 origin 的——port 每次不一樣，等於使用者每次開 App 登入的 session 都救不回來，變成每次啟動都要重新登入。最後改成桌面殼直接用固定的 `file://` 路徑內嵌網頁（不透過任何本機 HTTP 伺服器），origin 因此穩定；憑證（DB 連線字串、LLM API 金鑰）完全不進桌面版 App，一律留在 Render——這是刻意的安全取捨:客戶端的機密本質上無法真正保護（程式執行時必須能解密才能用，加密只是提高門檻），所以憑證乾脆不下發，桌面版只拿一個範圍有限、可撤銷的 session token。
 
-### 資料庫層的三次教訓
-
-這個系統的資料庫連線層曾經在同一天內連續踩過三個層層遞進的坑，值得完整記錄:
-
-1. **全域鎖拖垮全站**——早期為了「安全」，用一把 Python `threading.Lock` 序列化所有資料庫存取，而取得連線的實作是每次都對 Neon 開一條全新連線（實測 1.2-1.6 秒）且沒有 timeout。這把鎖從加 Postgres 支援那天就在，不是後來哪次修改引入的——Postgres 本身透過 MVCC 正確處理並行，這把鎖從來就不是必要的。前端輪詢疊加高頻請求後，一次連線異常就會鎖住全站達分鐘等級，且 Neon 端完全看不到連線進來（請求根本沒送到，卡在自己 process 內部搶鎖）。
-2. **改用連線池，結果重演同一個問題**——第一直覺是「加連線池減少重建連線的成本」，但 `psycopg2.pool.ThreadedConnectionPool` 內部用同一把鎖同時保護「借連線」跟「建立新連線」，池子需要生出新連線時，`psycopg2.connect()`（真正的網路操作）是在持有那把鎖的狀態下執行的——一次新連線卡住，其他所有執行緒連「還一條已經用完的連線」都做不到。實測 10 個併發請求，第一個完成後其餘 9 個卡了 90 秒以上動不了。這正是要修的問題本身，只是換了一層、藏得更隱密，最後整個撤回。
-3. **拿掉鎖之後完全沒上限，把 instance 打掛**——移除全域鎖解決了凍結，但那把鎖同時也是唯一在做反壓的東西，拿掉後對正式服務打 10 個併發請求直接把 Render instance（0.1 CPU/512MB）打成 502。最終方案:每次呼叫獨立開一條連線、用完即關（不共用池），但用 `threading.Semaphore` 把同時存在的連線數限制在一個安全上限內——號誌跟互斥鎖的關鍵差別是它允許 N 個同時進行，一條連線卡住只用掉 N 個名額中的一個，其他人不受影響；再加上 `connect_timeout`，任何一條連線最多卡固定秒數就會快速失敗釋出名額，最壞情況因此有明確邊界。
-
-完整的技術細節、每一步的實測數據，見 `db_utils/connection.py` 檔案開頭的說明。
-
-### 用量統計時區的一次修正
-
-Gemini 每日用量重置時間點，官方文件字面上寫「美西午夜重置」，程式一開始也是照這個做的。但使用者實測發現對不起來——台灣時間下午某個時刻額度已經重置，換算成美西時間當下卻還沒到午夜。改成用 **UTC 午夜**當界線後，跟實測結果吻合（Google 官方支援論壇上也有其他人回報美西午夜之後沒有準時重置的狀況）。這是一個「文件寫的跟實測不符時，該相信實測」的例子。
-
-### 登入與 Session 架構
-
-主持人／管理員的身分驗證用 Google Identity Services 取得 ID Token，但**不會**把這個 Token 直接當長效憑證使用——Google ID Token 效期約 1 小時，直接拿來當每支 API 都要帶的憑證，會導致長時間的 Stage 1/校對作業（尤其遇到額度限制重試時）中途被登出，算好的結果因為登入過期存不下來。改成應用程式自己簽發、管理生命週期的 session token（`auth_utils/sessions.py`）:Google ID Token 只在 `/auth/login` 驗證一次，換發一個不透明字串（不是 JWT）存進 `sessions` 表，效期用「滑動視窗」設計（每次使用都刷新，只要使用者還在用就不會過期）。撤銷（管理員停用帳號）走另一條獨立路徑——`auth_utils/whitelist.py` 每次請求都即時查 `users`/`permissions` 表（帶 30 秒 TTL 快取），跟 session token 本身是否有效是兩件事，管理員在後台停用一個帳號，30 秒內就會生效，不受 session 效期影響。
-
-### 「阿舍老師的叮嚀」內容供應方式
-
-主介面左側有一塊純文字提示區塊，內容來自 `ta-notice.txt`（這個 repo根目錄）。這個功能的供應方式改了三次:
-
-1. 最早直接放在 `zh-cn-to-tw-web`，前端用 `fetch()` 讀同目錄檔案——瀏覽器版可以，但桌面版用 `file://` 載入頁面後行不通。
-2. 嘗試 `XMLHttpRequest`、隱藏 `<iframe>` 讀取——都失敗（`file://` 底下 JS 完全沒有辦法讀取同目錄的另一個檔案，不管透過哪個 API 都一樣，是這個平台的結構性限制）。
-3. 最後採用現在這個方案:內容移進這支 backend，透過 `GET /api/ta-notice`（不需要登入）供應，瀏覽器版跟桌面版共用同一條路徑，維護者一樣只要編輯 `ta-notice.txt`、commit、push、部署即可生效，不用碰任何程式碼。
-
 ### 檔案結構
 
 ```
@@ -132,11 +106,10 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-打開 `.env`，至少要填 `DATABASE_URL`（Neon Postgres 連線字串）跟
-`GEMINI_API_KEY` 才能跑 Stage 1；要測登入功能需要另外填
-`GOOGLE_CLIENT_ID`。
-
-> 這個專案沒有 SQLite 退回機制——`DATABASE_URL` 沒填，所有需要資料庫的操作都會直接報錯，不會靜默退回本機檔案。本機開發、桌面版 App、Render 一律連同一個 Neon 資料庫，只有一種資料來源。
+打開 `.env`，把 `DATABASE_URL`（Neon Postgres 連線字串）跟
+`GEMINI_API_KEY` 填成 Render 的 Environment 分頁裡設定的同一組值——
+本機開發、桌面版 App、Render 一律連同一個 Neon 資料庫，不是本機另外
+申請一組測試用的。要測登入功能需要另外填 `GOOGLE_CLIENT_ID`。
 
 ### 4. 準備至少一個管理員帳號
 
@@ -267,32 +240,6 @@ Mitigations tried (all just delayed the problem, none fixed it): pinning PaddleO
 
 **A considered-then-abandoned alternative**: bundling the entire backend into the desktop `.app` too (`packaging/backend_service.spec`, since deleted), running a full local copy. This was abandoned because a locally-run backend serving the web UI over HTTP binds to a randomly-assigned port on each launch (deliberately, to avoid a stale process squatting a fixed port) — and `localStorage` keys origin by `scheme+host+port`. A different port every launch means every launch is effectively a new origin, so the login session stored in `localStorage` could never survive a restart — the user had to log in again every single time. The fix was to have the desktop shell load the web UI from a fixed `file://` path instead (no local HTTP server involved at all), giving it a stable origin. Credentials (the DB connection string, LLM API keys) never ship inside the desktop app at all — they stay on Render exclusively. This was a deliberate security tradeoff: client-side secrets can't actually be protected (the code must be able to decrypt them to use them, so encryption only raises the bar, it doesn't close the door) — so the desktop app is simply never handed anything worth stealing; it only gets a scoped, revocable session token.
 
-### Three Lessons at the Database Layer
-
-The database connection layer went through three progressively deeper lessons in a single day, worth recording in full:
-
-1. **A global lock froze the whole service** — early on, a Python `threading.Lock` serialized every database access "for safety," and acquiring a connection meant opening a brand-new one to Neon every time (measured 1.2–1.6s), with no timeout. This lock had been there since the commit that first added Postgres support — it wasn't introduced by any later change. Postgres itself handles concurrency correctly via MVCC; the lock was never actually necessary. Once frontend polling piled on enough request volume, a single slow connection could freeze the entire service for minutes, and Neon would show zero incoming connections the whole time — the requests never even left the process, stuck queued behind the lock.
-2. **Switching to a connection pool reproduced the exact same bug** — the first instinct was "add a pool to amortize the reconnect cost," but `psycopg2.pool.ThreadedConnectionPool` guards both "borrow a connection" and "create a new connection" with the same internal lock — when the pool needs to grow, `psycopg2.connect()` (the actual network call) runs *while holding that lock*. One stuck new-connection attempt meant every other thread — including ones just trying to *return* a connection they'd already finished with — was blocked too. Measured: 10 concurrent requests, the first one finished, and the other 9 sat stuck for 90+ seconds. This was the exact bug being fixed, just relocated one layer deeper and harder to see. Abandoned entirely.
-3. **Removing the lock with no replacement took down the instance** — removing the global lock fixed the freeze, but that lock had also been the only thing providing backpressure. With it gone, ten concurrent requests against the live Render instance (0.1 CPU/512MB) crashed it outright with 502s. The final design: every call opens and closes its own independent connection (no shared pool), bounded by a `threading.Semaphore` capping how many can exist at once. The key difference from a mutex is that a semaphore admits N concurrently — one stuck connection consumes one of N slots, everyone else proceeds unaffected — paired with a `connect_timeout` so any single connection fails fast rather than hanging indefinitely, giving the worst case a real ceiling.
-
-Full technical detail and the actual measurements are in the module docstring at the top of `db_utils/connection.py`.
-
-### A Timezone Correction for Usage Stats
-
-Gemini's daily quota reset time is documented as "resets at midnight Pacific time," and the code originally followed that literally. Real-world testing showed it didn't line up — at a given Taiwan-afternoon moment the quota had already reset, while the corresponding Pacific time hadn't reached midnight yet. Switching the boundary to **UTC midnight** matched observed behavior (other users on Google's own support forum have also reported the documented Pacific-midnight reset not firing on time). A case of trusting real measurement over documentation text.
-
-### Login & Session Architecture
-
-GM/admin identity verification uses Google Identity Services to obtain an ID Token, but that token is deliberately **not** used directly as a long-lived credential — Google ID Tokens expire in about an hour, and using one as the bearer credential for every API call would silently sign users out mid-session during long Stage 1/proofreading runs (especially once quota-retry backoff is involved), losing already-computed results that couldn't be saved under an expired credential. Instead, the app mints and manages its own session token (`auth_utils/sessions.py`): the Google ID Token is verified exactly once at `/auth/login`, exchanged for an opaque string (not a JWT) stored in a `sessions` table with a sliding expiry (refreshed on every use — a session that's actively being used effectively never expires). Revocation (an admin deactivating an account) is handled by a fully separate path — `auth_utils/whitelist.py` checks the `users`/`permissions` tables live on every request (with a 30-second TTL cache) — independent of whether the session token itself is still valid, so deactivating someone in the admin panel takes effect within 30 seconds regardless of session state.
-
-### How the "Teacher's Notes" Sidebar Content Is Served
-
-The main page has a plain-text tip panel sourced from `ta-notice.txt` (in this repo's root). How it's served has changed three times:
-
-1. Originally lived in `zh-cn-to-tw-web`, read via `fetch()` on the same-directory file — worked fine in the browser, but broke once the desktop app started loading pages via `file://`.
-2. Tried `XMLHttpRequest` and a hidden `<iframe>` — both failed too (under `file://`, JS has no way at all to read another file in the same directory, regardless of which API is used — a structural platform limitation, not an API choice).
-3. The final approach: moved into this backend, served via `GET /api/ta-notice` (no login required), shared by both the browser and desktop versions. Maintaining it is still just editing `ta-notice.txt`, commit, push, deploy — no code changes needed.
-
 ### File Layout
 
 ```
@@ -348,11 +295,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and fill in at minimum `DATABASE_URL` (a Neon Postgres
-connection string) and `GEMINI_API_KEY` to run Stage 1; testing login
-also requires `GOOGLE_CLIENT_ID`.
-
-> This project has no SQLite fallback — an unset `DATABASE_URL` makes every database operation raise immediately, never silently falling back to a local file. Local dev, the desktop app, and Render all connect to the same Neon database; there is only one source of truth.
+Open `.env` and set `DATABASE_URL` (a Neon Postgres connection string)
+and `GEMINI_API_KEY` to the same values already configured on Render's
+Environment tab — local dev, the desktop app, and Render all connect
+to the same Neon database, not a separate one set up just for local
+testing. Testing login also requires `GOOGLE_CLIENT_ID`.
 
 ### 4. Seed at Least One Admin Account
 
