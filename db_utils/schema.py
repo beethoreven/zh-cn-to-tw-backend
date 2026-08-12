@@ -7,6 +7,9 @@
 3. projects
 4. usage_log（用量記錄表）
 5. sessions（應用程式自己簽發的登入 session）
+6. jobs（Stage 1/2 工作狀態）
+7. app_versions（桌面版 App 強制更新門檻）——沒有 FK 依賴，順序其實
+   不重要，放最後只是照加入的時間排
 
 只支援 Postgres（Neon），不再有 SQLite 模式——見 db_utils/connection.py。
 
@@ -71,6 +74,7 @@ def ensure_schema(cur) -> None:
         _ensure_usage_log(cur)
         _ensure_sessions(cur)
         _ensure_jobs(cur)
+        _ensure_app_versions(cur)
 
         _schema_ready = True
 
@@ -192,3 +196,40 @@ def _ensure_jobs(cur) -> None:
     # 都會掃這兩個欄位
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+
+
+def _ensure_app_versions(cur) -> None:
+    # 桌面版 App 的強制更新門檻，一個作業系統一列（目前只有 macos，
+    # Windows 版之後會再插一列，不是預先建好等它用）。版本號拆成
+    # major/minor 兩個整數存，不存版本字串——字串排序會把
+    # "0.9" 排在 "0.10" 後面，比較邏輯本身就是錯的；拆欄位存，
+    # 呼叫端（version_check API）直接用整數比較，不用在查詢當下
+    # 現拆字串。
+    #
+    # os_version 欄位先留著（對應未來可能需要的「最低支援系統版本」
+    # 這類需求），但目前的強制更新判斷完全不看這個欄位，只看
+    # min_major/min_minor——不要在還沒有實際使用情境前，先把邏輯建
+    # 在一個空欄位上。
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_versions (
+            id SERIAL PRIMARY KEY,
+            os TEXT NOT NULL UNIQUE,
+            os_version TEXT,
+            latest_major INTEGER NOT NULL,
+            latest_minor INTEGER NOT NULL,
+            min_major INTEGER NOT NULL,
+            min_minor INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute("SELECT COUNT(*) FROM app_versions WHERE os = 'macos'")
+    if cur.fetchone()[0] == 0:
+        # 種子值等於目前實際出的版本（0.1）——上線當下不會有任何人被
+        # 強制要求更新，門檻要手動調整（之後出新版、決定要不要強制
+        # 大家升級時）才會生效。
+        cur.execute(
+            "INSERT INTO app_versions "
+            "(os, latest_major, latest_minor, min_major, min_minor) "
+            "VALUES ('macos', 0, 1, 0, 1)"
+        )

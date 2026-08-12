@@ -16,7 +16,7 @@ from admin_utils import projects as admin_projects
 from admin_utils import users as admin_users
 from auth_utils import auth, sessions, whitelist
 from configs import config
-from db_utils import job_store
+from db_utils import app_versions, job_store
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
 from pipeline.orchestrator import run_pipeline, run_refine_only_pipeline
@@ -174,6 +174,47 @@ def ta_notice():
     except FileNotFoundError:
         text = ""
     return jsonify({"text": text})
+
+
+_UPDATE_URL = "https://beethoreven.github.io/zh-cn-to-tw-web/"
+
+
+@app.get("/api/version_check")
+def version_check():
+    """桌面殼在開始 Stage 1/Stage 2 工作前各打一次（見
+    zh-cn-to-tw-mac/zh-cn-to-tw-web README），帶自己的 os/version 查有
+    沒有被強制要求更新。刻意不要求登入——版本號不是敏感資訊，而且不該
+    因為 session 剛好過期就連「該不該更新」這個問題都問不到。
+
+    版本號用 major/minor 兩個整數比較，不比字串（字串排序會把 "0.9"
+    排在 "0.10" 後面，比較邏輯本身就是錯的）。查無這個 os 的門檻資料
+    時一律不擋——資料庫暫時查不到不該變成擋住使用者工作的理由，門檻
+    表本來就是「有資料才擋、沒資料不擋」的設計。
+    """
+    os_name = request.args.get("os", "").strip().lower()
+    major_raw = request.args.get("major")
+    minor_raw = request.args.get("minor")
+
+    if not os_name or major_raw is None or minor_raw is None:
+        return jsonify({"error": "缺少 os/major/minor 參數"}), 400
+    try:
+        major, minor = int(major_raw), int(minor_raw)
+    except ValueError:
+        return jsonify({"error": "major/minor 必須是整數"}), 400
+
+    policy = app_versions.get_policy(os_name)
+    if policy is None:
+        return jsonify({"force_update": False})
+
+    force_update = (major, minor) < (policy["min_major"], policy["min_minor"])
+    return jsonify(
+        {
+            "force_update": force_update,
+            "latest_version": f"{policy['latest_major']}.{policy['latest_minor']}",
+            "min_version": f"{policy['min_major']}.{policy['min_minor']}",
+            "update_url": _UPDATE_URL,
+        }
+    )
 
 
 @app.post("/auth/login")

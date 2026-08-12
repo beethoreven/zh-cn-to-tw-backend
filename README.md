@@ -58,9 +58,10 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 app.py                  路由入口
 configs/config.py       集中管理設定值與環境變數
 db_utils/                資料庫層
-  ├── connection.py       連線管理（見上方「資料庫層的三次教訓」）
+  ├── connection.py       連線管理（見檔案開頭的說明）
   ├── schema.py            建表/遷移
-  └── job_store.py         job/review 狀態持久化到 Neon
+  ├── job_store.py         job/review 狀態持久化到 Neon
+  └── app_versions.py      桌面版 App 強制更新門檻查詢
 auth_utils/               Google 登入驗證、session、白名單
 jobs/ review/             Stage 1/Stage 2 各自的工作管理
 pipeline/orchestrator.py  Stage 1 的 OCR→簡轉繁→潤飾 流程編排
@@ -164,8 +165,13 @@ curl https://<你的部署網址>/api/jobs/active
 
 除了 `GET /api/health`（keep-alive 用，公開）跟 `GET /auth/status`
 （查登入狀態本身，未授權不算失敗）跟 `GET /api/ta-notice`（叮嚀內容，
-公開）以外，全部都要帶 `Authorization: Bearer <session token>`；
-`/admin/*` 另外要求角色是管理員。
+公開）跟 `GET /api/version_check`（強制更新檢查，公開）以外，全部都要
+帶 `Authorization: Bearer <session token>`；`/admin/*` 另外要求角色是
+管理員。
+
+### 版本檢查
+
+- `GET /api/version_check?os=macos&major=0&minor=1` — 桌面殼在開始 Stage 1/2 前各打一次，回傳是否要強制更新
 
 ### Stage 1
 
@@ -246,9 +252,10 @@ Mitigations tried (all just delayed the problem, none fixed it): pinning PaddleO
 app.py                  routing entry point
 configs/config.py       centralized settings & env vars
 db_utils/                database layer
-  ├── connection.py       connection management (see "Three Lessons" above)
+  ├── connection.py       connection management (see the module docstring)
   ├── schema.py            table creation/migration
-  └── job_store.py         job/review state persisted to Neon
+  ├── job_store.py         job/review state persisted to Neon
+  └── app_versions.py      forced-update threshold lookups for the desktop app
 auth_utils/               Google sign-in verification, sessions, whitelist
 jobs/ review/             Stage 1/Stage 2 job management
 pipeline/orchestrator.py  Stage 1's OCR→conversion→polish orchestration
@@ -356,10 +363,15 @@ whether it's required and what it's for. The essentials:
 ## Part D. API Overview
 
 Aside from `GET /api/health` (keep-alive, public), `GET /auth/status`
-(checks login status itself, unauthorized isn't a failure), and
-`GET /api/ta-notice` (the notes content, public), every endpoint
+(checks login status itself, unauthorized isn't a failure),
+`GET /api/ta-notice` (the notes content, public), and
+`GET /api/version_check` (forced-update check, public), every endpoint
 requires `Authorization: Bearer <session token>`; `/admin/*` further
 requires the admin role.
+
+### Version Check
+
+- `GET /api/version_check?os=macos&major=0&minor=1` — the desktop shell calls this once before starting Stage 1 and once before Stage 2, to find out whether it must force an update
 
 ### Stage 1
 
