@@ -15,7 +15,7 @@
 
 ### 這是什麼
 
-主持人／製作方拿到的劇本殺劇本經常是簡體中文 PDF，需要先轉成台灣慣用的繁體中文才能給玩家使用。這個工具把「OCR 辨識 → 簡轉繁 → LLM 潤飾 → 人工校對」這條原本要手工做的流程自動化，分成兩個階段:
+主持人／劇本負責人拿到的劇本殺劇本經常是簡體中文 PDF，需要先轉成台灣慣用的繁體中文才能給玩家使用。這個工具把「OCR 辨識 → 簡轉繁 → LLM 潤飾 → 人工校對」這條原本要手工做的流程自動化，分成兩個階段:
 
 - **Stage 1（簡轉繁）**:上傳 PDF，自動 OCR + 簡轉繁 + LLM 潤飾（斷句、標點、修正 OCR 誤植錯字），輸出可下載的 .txt/.docx。
 - **Stage 2（校對）**:對 Stage 1 的輸出（或直接上傳已經是繁體的檔案）再跑一輪 LLM 校對，抓用詞/錯字/標點問題，結構化清單讓使用者逐筆勾選要不要套用。
@@ -29,17 +29,15 @@
 ```
 zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本身不部署
 ├── zh-cn-to-tw-backend/         ← 本 repo，部署到 Render(Flask)
-├── zh-cn-to-tw-web/             ← 前端，部署到 GitHub Pages，也被桌面版 App 內嵌
+├── zh-cn-to-tw-web/             ← 前端，app/ 子資料夾被桌面版 App 內嵌；repo 根目錄是 GitHub Pages 用的公開佔位頁
 ├── zh-cn-to-tw-mac/             ← macOS 桌面殼（Swift/SwiftUI + WKWebView）
 └── zh-cn-to-tw-ocr-service/     ← 只在使用者本機跑的 OCR 服務，被桌面殼當子行程拉起
 ```
 
-這個架構是**演化來的，不是一開始就設計成這樣**——最初版本很單純：Render 後端接一切（含 OCR），瀏覽器直接打開 GitHub Pages 用。後來實測 Render 免費方案（0.1 CPU、512MB RAM）完全扛不住 PaddleOCR（見下方「為什麼 OCR 搬到使用者本機」），才逐步演變出桌面版這條分支。**兩條使用路徑目前並存**:
+這個架構是**演化來的，不是一開始就設計成這樣**——最初版本很單純：Render 後端接一切（含 OCR），瀏覽器直接打開 GitHub Pages 用。後來實測 Render 免費方案（0.1 CPU、512MB RAM）完全扛不住 PaddleOCR（見下方「為什麼 OCR 搬到使用者本機」），才逐步演變出桌面版這條分支。桌面版現在是**唯一要主推的使用方式**：
 
-- **瀏覽器版**(GitHub Pages):PDF 直接上傳給這支 backend，OCR **也在 Render 上跑**(`pipeline/orchestrator.py` 的 `run_ocr_stage`)。這條路徑仍然承受著 Render 資源限制的風險，只是靠很保守的執行緒/DPI 設定跟逐頁串流勉強撐住，沒有從根本解決。
 - **桌面版**(zh-cn-to-tw-mac):OCR 在使用者自己的機器上跑(`zh-cn-to-tw-ocr-service`)，只把 OCR 完的簡體文字傳給這支 backend 做簡轉繁/LLM 潤飾(`POST /api/jobs/from-ocr-text`)，backend 完全不碰 PDF 也不跑 PaddleOCR。
-
-換句話說，這支 backend 同時保留了「舊的、有資源風險的 OCR 路徑」跟「新的、只收文字的路徑」——**故意沒有把舊路徑刪掉**，因為瀏覽器版還在用。
+- **舊的瀏覽器版路徑**（PDF 直接上傳給這支 backend、OCR 也在 Render 上跑，`pipeline/orchestrator.py` 的 `run_ocr_stage`）:程式碼還在，`POST /api/jobs` 這支 endpoint 沒有被刪掉，理論上仍然承受著 Render 資源限制的風險。但這條路徑已經不再從任何公開入口連結出去——GitHub Pages(`zh-cn-to-tw-web` 的 repo 根目錄)現在只是一個「網站建構中」的佔位頁，不再是可操作介面(見 `zh-cn-to-tw-web` README「為什麼 repo 根目錄跟 `app/` 分開放」)。這支 backend 的程式碼本身還沒有跟進拆掉這條路徑，是刻意先從入口切斷，之後再決定要不要真的移除程式碼。
 
 ### 為什麼 OCR 搬到使用者本機（重大架構決策）
 
@@ -232,7 +230,7 @@ This is the backend API for a tool that converts Simplified-Chinese murder-myste
 
 ### What This Is
 
-Game-master scripts often arrive as Simplified-Chinese PDFs and need converting to the Traditional Chinese used in Taiwan before players can use them. This tool automates "OCR → Simplified-to-Traditional conversion → LLM polish → human proofreading" into two stages:
+Game-master / scripts owner often get MMG script in Simplified-Chinese PDFs and need converting to the Traditional Chinese used in Taiwan before players can use them. This tool automates "OCR → Simplified-to-Traditional conversion → LLM polish → human proofreading" into two stages:
 
 - **Stage 1 (Convert)**: upload a PDF → OCR + conversion + LLM polish (sentence breaks, punctuation, fixing obvious OCR misreads) → downloadable .txt/.docx.
 - **Stage 2 (Proofread)**: run another LLM pass over Stage 1's output (or a directly-uploaded already-Traditional file) to catch wording/typo/punctuation issues, presented as a structured checklist the user selectively applies.
@@ -246,17 +244,15 @@ The project spans four independent repos, wired together via a git meta-repo (`z
 ```
 zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never deployed itself
 ├── zh-cn-to-tw-backend/         ← this repo, deployed to Render (Flask)
-├── zh-cn-to-tw-web/             ← frontend, deployed to GitHub Pages, also embedded in the desktop app
+├── zh-cn-to-tw-web/             ← frontend; its app/ subfolder is embedded in the desktop app, and its repo root is GitHub Pages' public placeholder
 ├── zh-cn-to-tw-mac/             ← macOS desktop shell (Swift/SwiftUI + WKWebView)
 └── zh-cn-to-tw-ocr-service/     ← local-only OCR service, launched as a subprocess by the desktop shell
 ```
 
-This architecture **evolved, it wasn't designed this way from day one** — the original version was simple: Render handled everything (including OCR), and a browser opened GitHub Pages directly. It turned out Render's free tier (0.1 CPU, 512MB RAM) couldn't handle PaddleOCR at all (see "Why OCR Moved to the User's Own Machine" below), which is what eventually produced the desktop branch. **Both paths coexist today**:
+This architecture **evolved, it wasn't designed this way from day one** — the original version was simple: Render handled everything (including OCR), and a browser opened GitHub Pages directly. It turned out Render's free tier (0.1 CPU, 512MB RAM) couldn't handle PaddleOCR at all (see "Why OCR Moved to the User's Own Machine" below), which is what eventually produced the desktop branch. The desktop path is now **the only one meant to be used**:
 
-- **Browser path** (GitHub Pages): the PDF is uploaded directly to this backend, and OCR **also runs on Render** (`pipeline/orchestrator.py`'s `run_ocr_stage`). This path still carries Render's resource-limit risk, only barely held together by conservative thread/DPI settings and page-by-page streaming — never actually root-caused.
 - **Desktop path** (zh-cn-to-tw-mac): OCR runs on the user's own machine (`zh-cn-to-tw-ocr-service`); only the already-OCR'd plain text is sent to this backend for conversion/LLM polish (`POST /api/jobs/from-ocr-text`). This backend never touches a PDF or runs PaddleOCR at all for this path.
-
-In other words, this backend deliberately keeps both "the old, resource-risky OCR path" and "the new, text-only path" side by side — the old one wasn't deleted because the browser version still depends on it.
+- **Old browser path** (the PDF uploaded straight to this backend, OCR also running on Render via `pipeline/orchestrator.py`'s `run_ocr_stage`): the code is still here — `POST /api/jobs` hasn't been removed — and in theory still carries Render's resource-limit risk. But this path is no longer linked from any public entry point: GitHub Pages (`zh-cn-to-tw-web`'s repo root) is now just a "site under construction" placeholder, not an operable interface (see `zh-cn-to-tw-web`'s README, "Why the Repo Root and `app/` Live Apart"). This backend's own code hasn't caught up to removing the path yet — the entry point was deliberately cut first, with the decision on whether to actually delete the code left for later.
 
 ### Why OCR Moved to the User's Own Machine (major architecture pivot)
 
