@@ -32,18 +32,27 @@ psycopg2.connect()（真正的網路操作）是在持有那把鎖的狀態下�
 90 秒以上完全沒有動靜。這正是要修的那個「鎖包住無邊界網路操作」的
 問題，只是換了個地方重演一次，已經撤掉。
 
-現在的做法：完全不用共用的鎖或池，每次呼叫都獨立開一條連線、用完就真的
-關掉，但明確帶 connect_timeout——這樣一來，慢是「這一個呼叫自己慢」，
-不會拖累其他任何人；連線卡住也是快速失敗（10 秒逾時），不會無限期掛著。
-這個工具呼叫量很小，多付一點每次都要重新連線的成本（1.2-1.6 秒），換
-來的是任何一次連線異常都只影響那一個請求，不會擴散成全站級的凍結——
-這比省下那 1.x 秒更重要。之後如果流量成長到真的需要池化，要挑一個
-「建立新連線不會佔住共用鎖」的池實作，不能重蹈這裡的覆轍。
+歷史教訓三：把全域鎖拿掉之後，一度變成「完全沒有任何併發上限」，結果在
+Render 免費方案（0.1 CPU / 512 MB）上實測 10 個併發請求直接把 instance
+打掛（整個服務 502，要等它自己重啟才恢復）。那把鎖雖然把並行度壓到 1、
+造成前面說的凍結，但它同時也是唯一在做「反壓」的東西——拿掉它就等於
+把水閘整個拆了。教訓是：問題從來不是「有沒有上限」，而是「上限是 1，
+而且持有上限的那段時間沒有邊界」。
+
+現在的做法：每次呼叫都獨立開一條連線、用完就真的關掉，不共用池；但用
+一個號誌（semaphore）把「同時存在的連線數」限制在 _MAX_CONCURRENT_DB
+以內。號誌跟互斥鎖的關鍵差別是它允許 N 個同時進行，不是 1 個——一條
+連線卡住只會用掉 N 個名額中的一個，其他人照常работа；再加上
+connect_timeout 保證任何一條連線最多卡 10 秒就會失敗釋出名額，所以
+最壞情況是有邊界的，不會像原本那樣無限期凍結全站。
 """
 
 from __future__ import annotations
 
+import threading
+
 import psycopg2
+import psycopg2.extensions
 
 # 一定要透過 configs.config 讀，不要在這裡直接讀 os.environ——這支模組
 # 會在 app.py 最上面就被間接 import（admin_utils/auth_utils 都會用到），
@@ -59,6 +68,72 @@ DATABASE_URL = config.DATABASE_URL
 # 同時遠比「無限期掛著」安全——這是這次修正裡最核心的一行。
 _CONNECT_TIMEOUT_SECONDS = 10
 
+# 同時最多幾條資料庫連線。這是「反壓」，不是「互斥」——差別很重要：
+# 互斥鎖只准 1 個進行，一卡住全站跟著死；號誌准 N 個同時進行，一條卡住
+# 只用掉 N 個名額中的一個。Render 免費方案是 0.1 CPU / 512 MB，實測完全
+# 不設上限時，10 個併發連線就足以把整個 instance 打掛（服務 502，要等它
+# 自己重啟）。5 這個數字對這個工具的實際並行量（前端輪詢 + 背景批次）
+# 綽綽有餘，又離「打爆 instance」有安全距離。
+_MAX_CONCURRENT_DB = 5
+_db_slots = threading.Semaphore(_MAX_CONCURRENT_DB)
+
+# 等不到名額時最多等多久。一定要有上限：不設的話，一旦所有名額都被慢速
+# 連線佔住，後面的請求會無限期排隊，又變回「整個後端凍住」的老問題，
+# 只是換成排在號誌前面而不是排在鎖前面。等不到就明確失敗，讓呼叫端能
+# 回報錯誤、讓使用者知道發生什麼事。
+_SLOT_WAIT_TIMEOUT_SECONDS = 20
+
+
+class _SlotGuard:
+    """借用一個連線名額，並保證它一定會被還回去。
+
+    綁在 connection 物件上（見 get_conn）：呼叫端原本就一定會呼叫
+    conn.close()（每個呼叫端都寫在 finally 裡），把「還名額」掛在
+    close() 上，就不需要要求所有呼叫端改寫成 with 區塊。
+    """
+
+    def __init__(self):
+        if not _db_slots.acquire(timeout=_SLOT_WAIT_TIMEOUT_SECONDS):
+            raise RuntimeError(
+                f"資料庫忙碌中（同時連線數已達上限 {_MAX_CONCURRENT_DB}），"
+                f"等待 {_SLOT_WAIT_TIMEOUT_SECONDS} 秒後仍無法取得連線"
+            )
+        self._released = False
+
+    def release(self):
+        # 防止重複釋放：呼叫端如果不小心 close() 兩次，多還一個名額會讓
+        # 上限逐漸失效，是很難察覺的漏洞。
+        if not self._released:
+            self._released = True
+            _db_slots.release()
+
+
+class _SlotReleasingConnection(psycopg2.extensions.connection):
+    """close() 時順便把號誌名額還回去。
+
+    為什麼要用子類別而不是直接覆寫 conn.close：psycopg2 的 connection 是
+    C extension，close 是唯讀屬性，指派會直接丟
+    `AttributeError: attribute 'close' is read-only`（實測撞過）。
+    connection_factory 是官方支援的擴充點，用它才改得動。
+
+    注意這裡跟先前試過又撤掉的連線池不同：這條連線 close() 就是真的關閉，
+    沒有任何共用的池或鎖，名額只是計數器加減，不會有「一條卡住、其他人
+    連還都還不了」的問題。
+    """
+
+    _slot_guard = None
+
+    def attach_slot(self, guard):
+        self._slot_guard = guard
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            if self._slot_guard is not None:
+                self._slot_guard.release()
+                self._slot_guard = None
+
 
 def sql(query: str) -> str:
     """查詢語法統一用 `?` 佔位符撰寫（單一事實來源），這裡轉成 psycopg2
@@ -70,8 +145,11 @@ def sql(query: str) -> str:
 def get_conn():
     """回傳 (conn, cur)，不做任何 schema 檢查/建立——schema 的事由
     db_utils.schema.ensure_schema() 統一負責，且只在 process 生命週期裡
-    做一次。每次呼叫都是一條獨立、用完即關的新連線，不共用任何鎖或池
-    （見檔案開頭的說明），一個呼叫端連線異常不會拖累其他人。"""
+    做一次。每次呼叫都是一條獨立、用完即關的新連線，不共用連線池，但受
+    _MAX_CONCURRENT_DB 這個號誌節制（見檔案開頭的說明）。
+
+    呼叫端照舊在 finally 裡呼叫 conn.close() 即可，名額會跟著一起還回去。
+    """
     if not DATABASE_URL:
         raise RuntimeError(
             "環境變數 DATABASE_URL 未設定，無法連線資料庫。"
@@ -79,7 +157,20 @@ def get_conn():
             "桌面版 App 則是打包時把 .env 一起放進執行檔旁邊。"
         )
 
-    conn = psycopg2.connect(DATABASE_URL, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    guard = _SlotGuard()
+    try:
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+            connection_factory=_SlotReleasingConnection,
+        )
+    except Exception:
+        # 連線失敗一定要把名額還回去，不然失敗幾次之後名額就被耗光了，
+        # 整個後端會卡在「等名額」——那正是這次要根治的凍結型故障。
+        guard.release()
+        raise
+
+    conn.attach_slot(guard)
     cur = conn.cursor()
     return conn, cur
 
