@@ -29,7 +29,7 @@
 ```
 zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本身不部署
 ├── zh-cn-to-tw-backend/         ← 本 repo，部署到 Render(Flask)
-├── zh-cn-to-tw-web/             ← 前端，app/ 子資料夾被桌面版 App 內嵌；repo 根目錄是 GitHub Pages 用的公開佔位頁
+├── zh-cn-to-tw-web/             ← 前端，main 分支被桌面版 App 內嵌；GitHub Pages 服務的是另一個獨立的 update-page 分支（純佔位頁）
 ├── zh-cn-to-tw-mac/             ← macOS 桌面殼（Swift/SwiftUI + WKWebView）
 └── zh-cn-to-tw-ocr-service/     ← 只在使用者本機跑的 OCR 服務，被桌面殼當子行程拉起
 ```
@@ -37,7 +37,7 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 這個架構是**演化來的，不是一開始就設計成這樣**——最初版本很單純：Render 後端接一切（含 OCR），瀏覽器直接打開 GitHub Pages 用。後來實測 Render 免費方案（0.1 CPU、512MB RAM）完全扛不住 PaddleOCR（見下方「為什麼 OCR 搬到使用者本機」），才逐步演變出桌面版這條分支。桌面版現在是**唯一要主推的使用方式**：
 
 - **桌面版**(zh-cn-to-tw-mac):OCR 在使用者自己的機器上跑(`zh-cn-to-tw-ocr-service`)，只把 OCR 完的簡體文字傳給這支 backend 做簡轉繁/LLM 潤飾(`POST /api/jobs/from-ocr-text`)，backend 完全不碰 PDF 也不跑 PaddleOCR。
-- **舊的瀏覽器版路徑**（PDF 直接上傳給這支 backend、OCR 也在 Render 上跑，`pipeline/orchestrator.py` 的 `run_ocr_stage`）:程式碼還在，`POST /api/jobs` 這支 endpoint 沒有被刪掉，理論上仍然承受著 Render 資源限制的風險。但這條路徑已經不再從任何公開入口連結出去——GitHub Pages(`zh-cn-to-tw-web` 的 repo 根目錄)現在只是一個「網站建構中」的佔位頁，不再是可操作介面(見 `zh-cn-to-tw-web` README「為什麼 repo 根目錄跟 `app/` 分開放」)。這支 backend 的程式碼本身還沒有跟進拆掉這條路徑，是刻意先從入口切斷，之後再決定要不要真的移除程式碼。
+- **舊的瀏覽器版路徑**（PDF 直接上傳給這支 backend、OCR 也在 Render 上跑，`pipeline/orchestrator.py` 的 `run_ocr_stage`）:程式碼還在，`POST /api/jobs` 這支 endpoint 沒有被刪掉，理論上仍然承受著 Render 資源限制的風險。但這條路徑現在已經沒有任何公開網址打得到——`zh-cn-to-tw-web` 的 `main` 分支（放實際網頁內容的地方）從結構上就不在 GitHub Pages 的服務範圍內，GitHub Pages 服務的是另一個完全獨立、沒有共同檔案的 `update-page` 分支，只有一個「網站建構中」的佔位頁(見 `zh-cn-to-tw-web` README「為什麼這個 repo 的內容不會出現在 GitHub Pages 上」)。這支 backend 的程式碼本身還沒有跟進拆掉這條路徑，只在本機開發環境下還碰得到。
 
 ### 為什麼 OCR 搬到使用者本機（重大架構決策）
 
@@ -244,7 +244,7 @@ The project spans four independent repos, wired together via a git meta-repo (`z
 ```
 zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never deployed itself
 ├── zh-cn-to-tw-backend/         ← this repo, deployed to Render (Flask)
-├── zh-cn-to-tw-web/             ← frontend; its app/ subfolder is embedded in the desktop app, and its repo root is GitHub Pages' public placeholder
+├── zh-cn-to-tw-web/             ← frontend; its main branch is embedded in the desktop app; GitHub Pages serves a separate update-page branch (a pure placeholder)
 ├── zh-cn-to-tw-mac/             ← macOS desktop shell (Swift/SwiftUI + WKWebView)
 └── zh-cn-to-tw-ocr-service/     ← local-only OCR service, launched as a subprocess by the desktop shell
 ```
@@ -252,7 +252,7 @@ zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never d
 This architecture **evolved, it wasn't designed this way from day one** — the original version was simple: Render handled everything (including OCR), and a browser opened GitHub Pages directly. It turned out Render's free tier (0.1 CPU, 512MB RAM) couldn't handle PaddleOCR at all (see "Why OCR Moved to the User's Own Machine" below), which is what eventually produced the desktop branch. The desktop path is now **the only one meant to be used**:
 
 - **Desktop path** (zh-cn-to-tw-mac): OCR runs on the user's own machine (`zh-cn-to-tw-ocr-service`); only the already-OCR'd plain text is sent to this backend for conversion/LLM polish (`POST /api/jobs/from-ocr-text`). This backend never touches a PDF or runs PaddleOCR at all for this path.
-- **Old browser path** (the PDF uploaded straight to this backend, OCR also running on Render via `pipeline/orchestrator.py`'s `run_ocr_stage`): the code is still here — `POST /api/jobs` hasn't been removed — and in theory still carries Render's resource-limit risk. But this path is no longer linked from any public entry point: GitHub Pages (`zh-cn-to-tw-web`'s repo root) is now just a "site under construction" placeholder, not an operable interface (see `zh-cn-to-tw-web`'s README, "Why the Repo Root and `app/` Live Apart"). This backend's own code hasn't caught up to removing the path yet — the entry point was deliberately cut first, with the decision on whether to actually delete the code left for later.
+- **Old browser path** (the PDF uploaded straight to this backend, OCR also running on Render via `pipeline/orchestrator.py`'s `run_ocr_stage`): the code is still here — `POST /api/jobs` hasn't been removed — and in theory still carries Render's resource-limit risk. But no public URL reaches it anymore — `zh-cn-to-tw-web`'s `main` branch (where the real web content lives) is structurally outside anything GitHub Pages serves; Pages serves a completely separate `update-page` branch with no files in common, holding only a "site under construction" placeholder (see `zh-cn-to-tw-web`'s README, "Why This Repo's Content Never Appears on GitHub Pages"). This backend's own code hasn't caught up to removing the path yet — it's only reachable in a local dev environment now.
 
 ### Why OCR Moved to the User's Own Machine (major architecture pivot)
 
