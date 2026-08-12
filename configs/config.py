@@ -9,42 +9,11 @@
 from __future__ import annotations
 
 import os
-import sys
 
 from dotenv import load_dotenv
 
 
-def _frozen_base_dir() -> str | None:
-    """被 PyInstaller 打包成獨立執行檔時，回傳執行檔本身所在的目錄；
-    不是打包狀態就回傳 None。桌面版 App 會把 backend 打包進 .app 裡跟
-    ocr-service 並列，這時候「目前工作目錄」完全不可預期（由 Finder/
-    LaunchServices 決定，通常是 /），不能拿來當找設定檔的基準。"""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return None
-
-
-# 本機開發：load_dotenv() 預設從目前工作目錄往上找 .env，正常在 repo
-# 根目錄執行就找得到。桌面版 App（打包狀態）：改成明確指定執行檔旁邊
-# 的 .env，不能靠工作目錄推測（見 _frozen_base_dir 說明）。
-_frozen_dir = _frozen_base_dir()
-if _frozen_dir:
-    load_dotenv(os.path.join(_frozen_dir, ".env"))
-else:
-    load_dotenv()
-
-# 網頁前端（zh-cn-to-tw-web 的 index.html/script.js/style.css…）所在目錄。
-# 桌面版 App 會把整份前端檔案包進 .app 裡，由這支 backend 自己一併提供，
-# 不再從 GitHub Pages 線上抓——這樣「除了 Google 登入、Neon DB、LLM API
-# 這三個一定要連外的服務之外，其他全部在本機完成」才真的成立。
-# 沒設定就是空字串，代表這次啟動不供應前端（純 API 模式，例如舊的
-# Render 部署方式），行為跟以前完全一樣。
-WEB_STATIC_DIR = os.environ.get("WEB_STATIC_DIR", "")
-if not WEB_STATIC_DIR and _frozen_dir:
-    # 打包狀態的預設值：build_app.sh 會把前端檔案放在執行檔旁邊的 web/
-    _bundled_web = os.path.join(_frozen_dir, "web")
-    if os.path.isdir(_bundled_web):
-        WEB_STATIC_DIR = _bundled_web
+load_dotenv()
 
 # 資料庫連線字串（Neon Postgres）。沒設定的話所有需要資料庫的操作都會
 # 直接拋出明確錯誤，不會有任何靜默退回本機檔案的行為——見

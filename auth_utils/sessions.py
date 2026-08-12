@@ -37,7 +37,7 @@ from db_utils.connection import get_ready_conn, sql
 SESSION_IDLE_DAYS = int(os.environ.get("SESSION_IDLE_DAYS", "90"))
 
 # last_seen_at 沒必要每次請求都真的寫一次 DB——前端輪詢 job/review 進度
-# 每 1.5 秒打一次 API，Neon 單次連線+查詢實測要 1.2-1.6 秒，不節流的話
+# 每 5 秒打一次 API，Neon 單次連線+查詢實測要 1.2-1.6 秒，不節流的話
 # 光是「順便更新一下時間戳記」就會把輪詢拖垮。跟 whitelist.py 的讀取
 # 快取是同樣的考量，這裡反過來對寫入做節流。
 _TOUCH_MIN_INTERVAL_SECONDS = 60
