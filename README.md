@@ -24,7 +24,7 @@
 
 ### 系統架構
 
-整個專案分成四個獨立 repo，透過一個 git meta-repo（`zh-cn-to-tw`）用 submodule 掛在一起（目前只有 `zh-cn-to-tw-backend`/`zh-cn-to-tw-web` 真的是 submodule，`zh-cn-to-tw-mac`/`zh-cn-to-tw-ocr-service` 還是本機獨立 repo，見頂層 README 的說明）:
+整個專案分成四個獨立 repo，透過一個 git meta-repo（`zh-cn-to-tw`）用 submodule 掛在一起（見頂層 README 的說明）:
 
 ```
 zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本身不部署
@@ -106,7 +106,6 @@ validators/               輸出驗證（例如殘留簡體字檢查）
 - `usage.db`（現在是 Neon 裡的 `usage_log` 表）記的是「本工具打了幾次」，不是 Google/Anthropic 官方帳務系統的即時數字，兩邊會有落差。
 - Stage 2 的「套用」是逐批次做局部字串替換，同一批次內同樣的錯字重複出現兩次以上，目前只會替換第一次出現的位置。
 - 瀏覽器版跟桌面版的 OCR 資源風險不對稱（見上方「系統架構」）——瀏覽器版仍然吃 Render 資源限制，桌面版已經完全繞開。
-- `zh-cn-to-tw-mac`/`zh-cn-to-tw-ocr-service` 目前不是頂層 meta-repo 的 git submodule，只是本機獨立 repo，也還沒推上 GitHub（沒有 remote）。
 
 ---
 
@@ -242,7 +241,7 @@ Human review is still required, but this tool removes most of the manual prep wo
 
 ### System Architecture
 
-The project spans four independent repos, wired together via a git meta-repo (`zh-cn-to-tw`) using submodules (currently only `zh-cn-to-tw-backend`/`zh-cn-to-tw-web` are true submodules; `zh-cn-to-tw-mac`/`zh-cn-to-tw-ocr-service` are still standalone local repos — see the top-level README):
+The project spans four independent repos, wired together via a git meta-repo (`zh-cn-to-tw`) using submodules (see the top-level README):
 
 ```
 zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never deployed itself
