@@ -225,11 +225,13 @@ def _ensure_app_versions(cur) -> None:
     )
     cur.execute("SELECT COUNT(*) FROM app_versions WHERE os = 'macos'")
     if cur.fetchone()[0] == 0:
-        # 種子值等於目前實際出的版本（0.1）——上線當下不會有任何人被
-        # 強制要求更新，門檻要手動調整（之後出新版、決定要不要強制
-        # 大家升級時）才會生效。
+        # 種子值等於目前實際出的版本（1.0，第一個正式發布的版本）——
+        # 上線當下不會有任何人被強制要求更新，門檻要手動調整（之後出
+        # 新版、決定要不要強制大家升級時）才會生效。這個種子值只有在
+        # 表格是空的（全新資料庫）時才會用到，正式環境的門檻是直接
+        # UPDATE 這張表調整，不會重跑這段程式碼。
         cur.execute(
             "INSERT INTO app_versions "
             "(os, latest_major, latest_minor, min_major, min_minor) "
-            "VALUES ('macos', 0, 1, 0, 1)"
+            "VALUES ('macos', 1, 0, 1, 0)"
         )
