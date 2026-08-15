@@ -199,23 +199,20 @@ def _ensure_jobs(cur) -> None:
 
 
 def _ensure_app_versions(cur) -> None:
-    # 桌面版 App 的強制更新門檻，一個作業系統一列（目前只有 macos，
-    # Windows 版之後會再插一列，不是預先建好等它用）。版本號拆成
-    # major/minor 兩個整數存，不存版本字串——字串排序會把
-    # "0.9" 排在 "0.10" 後面，比較邏輯本身就是錯的；拆欄位存，
-    # 呼叫端（version_check API）直接用整數比較，不用在查詢當下
-    # 現拆字串。
-    #
-    # os_version 欄位先留著（對應未來可能需要的「最低支援系統版本」
-    # 這類需求），但目前的強制更新判斷完全不看這個欄位，只看
-    # min_major/min_minor——不要在還沒有實際使用情境前，先把邏輯建
-    # 在一個空欄位上。
+    # 桌面版 App 的強制更新門檻。原本一個作業系統一列（os UNIQUE），
+    # 但 macOS 13 以下要另外拆一包 App（舊系統只留 Stage 2，Stage 1 鎖
+    # 住），兩包各自有各自的最低支援版號，同一個 os 底下要能同時放兩
+    # 筆——唯一鍵改成 (os, os_version) 複合鍵，os_version 從「先留著、
+    # 目前沒用到」的欄位變成真正拿來分流 build 的欄位。版本號本身仍然
+    # 拆 major/minor 兩個整數存，不存版本字串——字串排序會把 "0.9" 排在
+    # "0.10" 後面，比較邏輯本身就是錯的；拆欄位存，呼叫端
+    # （version_check API）直接用整數比較，不用在查詢當下現拆字串。
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS app_versions (
             id SERIAL PRIMARY KEY,
-            os TEXT NOT NULL UNIQUE,
-            os_version TEXT,
+            os TEXT NOT NULL,
+            os_version TEXT NOT NULL DEFAULT '13+',
             latest_major INTEGER NOT NULL,
             latest_minor INTEGER NOT NULL,
             min_major INTEGER NOT NULL,
@@ -223,15 +220,48 @@ def _ensure_app_versions(cur) -> None:
         )
         """
     )
-    cur.execute("SELECT COUNT(*) FROM app_versions WHERE os = 'macos'")
+
+    # 上面的 CREATE TABLE IF NOT EXISTS 對「表已經存在」的正式環境是
+    # 空操作，不會把舊的 os UNIQUE 換成新的複合鍵、也不會替既有那筆
+    # 資料補上 os_version——這幾步用 pg_constraint 查過現況再動，一定
+    # 跑得完全冪等，跑第二次（constraint 已經是新的）會直接跳過。
+    cur.execute(
+        "SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'app_versions'::regclass AND contype = 'u'"
+    )
+    existing_constraints = {row[0] for row in cur.fetchall()}
+    if "app_versions_os_key" in existing_constraints:
+        cur.execute("ALTER TABLE app_versions DROP CONSTRAINT app_versions_os_key")
+    if "app_versions_os_os_version_key" not in existing_constraints:
+        cur.execute(
+            "ALTER TABLE app_versions "
+            "ADD CONSTRAINT app_versions_os_os_version_key UNIQUE (os, os_version)"
+        )
+
+    # 舊環境既有那一筆是目前唯一在發的 build（macOS 13+），os_version
+    # 過去沒在用，多半是 NULL——補成 '13+' 才會正確落在新的分流鍵裡。
+    # 全新環境走上面 CREATE TABLE 的 DEFAULT '13+' 就直接是對的，這裡
+    # 對全新環境是無資料可改的空跑。補完之後才能把欄位鎖成 NOT NULL——
+    # 複合唯一鍵允許多筆 NULL 同時存在（Postgres 的 NULL 互不相等），
+    # os_version 是 NULL 的話「同一個 os 只能一筆」這個舊限制其實還是
+    # 沒解除。
+    cur.execute(
+        "UPDATE app_versions SET os_version = '13+' "
+        "WHERE os = 'macos' AND os_version IS NULL"
+    )
+    cur.execute("ALTER TABLE app_versions ALTER COLUMN os_version SET NOT NULL")
+
+    cur.execute("SELECT COUNT(*) FROM app_versions WHERE os = 'macos' AND os_version = '13+'")
     if cur.fetchone()[0] == 0:
         # 種子值等於目前實際出的版本（1.0，第一個正式發布的版本）——
         # 上線當下不會有任何人被強制要求更新，門檻要手動調整（之後出
         # 新版、決定要不要強制大家升級時）才會生效。這個種子值只有在
-        # 表格是空的（全新資料庫）時才會用到，正式環境的門檻是直接
-        # UPDATE 這張表調整，不會重跑這段程式碼。
+        # 這個 (os, os_version) 組合還沒有資料時才會用到，正式環境的
+        # 門檻是直接 UPDATE/INSERT 這張表調整，不會重跑這段程式碼——
+        # 12- 那包（macOS 12 以下、只給 Stage 2）等實際 build 出來、
+        # 定版號時再手動 INSERT 一筆，不在這裡預先埋。
         cur.execute(
             "INSERT INTO app_versions "
-            "(os, latest_major, latest_minor, min_major, min_minor) "
-            "VALUES ('macos', 1, 0, 1, 0)"
+            "(os, os_version, latest_major, latest_minor, min_major, min_minor) "
+            "VALUES ('macos', '13+', 1, 0, 1, 0)"
         )

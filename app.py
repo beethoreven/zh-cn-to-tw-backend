@@ -190,8 +190,15 @@ def version_check():
     排在 "0.10" 後面，比較邏輯本身就是錯的）。查無這個 os 的門檻資料
     時一律不擋——資料庫暫時查不到不該變成擋住使用者工作的理由，門檻
     表本來就是「有資料才擋、沒資料不擋」的設計。
+
+    同一個 os 可能同時有好幾包各自獨立發版的桌面 build（例如 macOS 13+
+    跟 12 以下各一包，見 db_utils/schema.py 的 app_versions 說明），
+    os_version 這個參數就是用來指定「我是哪一包」——省略時預設
+    '13+'，讓還沒帶這個新參數的舊 client（目前唯一發出去的那個 1.0
+    build）行為不變。
     """
     os_name = request.args.get("os", "").strip().lower()
+    os_version = request.args.get("os_version", "13+").strip()
     major_raw = request.args.get("major")
     minor_raw = request.args.get("minor")
 
@@ -202,7 +209,7 @@ def version_check():
     except ValueError:
         return jsonify({"error": "major/minor 必須是整數"}), 400
 
-    policy = app_versions.get_policy(os_name)
+    policy = app_versions.get_policy(os_name, os_version)
     if policy is None:
         return jsonify({"force_update": False})
 

@@ -171,7 +171,11 @@ curl https://<你的部署網址>/api/jobs/active
 
 ### 版本檢查
 
-- `GET /api/version_check?os=macos&major=0&minor=1` — 桌面殼在開始 Stage 1/2 前各打一次，回傳是否要強制更新
+- `GET /api/version_check?os=macos&os_version=13%2B&major=1&minor=0` — 桌面殼在開始 Stage 1/2 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 13 以上一包、12 以下只留 Stage 2 另一包各自一包），省略時預設 `13+`，維持目前唯一在發的那個 build 行為不變
+
+### 桌面版強制更新門檻
+
+`app_versions` 這張表的唯一鍵是 `(os, os_version)`，不是單獨的 `os`——這是為了讓同一個作業系統底下能同時放好幾筆各自獨立管理版控的門檻。調整門檻或新增一個分流（例如之後真的做出 macOS 12 以下的 build）都是直接在 Neon 對這張表下 SQL，不會重跑程式碼裡的種子資料段落。
 
 ### Stage 1
 
@@ -371,7 +375,11 @@ requires the admin role.
 
 ### Version Check
 
-- `GET /api/version_check?os=macos&major=0&minor=1` — the desktop shell calls this once before starting Stage 1 and once before Stage 2, to find out whether it must force an update
+- `GET /api/version_check?os=macos&os_version=13%2B&major=1&minor=0` — the desktop shell calls this once before starting Stage 1 and once before Stage 2, to find out whether it must force an update. `os_version` isn't "the user's OS version" — it's a build-tier selector: which desktop build this shell actually is, since the same `os` may end up with several independently-versioned desktop builds shipping side by side (e.g. one for macOS 13+, one for 12-and-below that only keeps Stage 2). Omitting it defaults to `13+`, keeping today's only shipped build's behavior unchanged
+
+### Desktop Forced-Update Thresholds
+
+The `app_versions` table's unique key is `(os, os_version)`, not `os` alone — this lets the same OS have several independently-managed threshold rows at once. Adjusting a threshold, or adding a new tier (e.g. once a real macOS-12-and-below build exists), is done with direct SQL against the table on Neon; it never re-runs the seed-data code path.
 
 ### Stage 1
 
