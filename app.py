@@ -511,10 +511,18 @@ def create_job():
             ),
             "file_name": file.filename,
             "detect_cover": _parse_bool(request.form.get("detect_cover"), config.COVER_DETECT_DEFAULT),
+            # 舊版前端/桌面殼不會帶這個參數，預設 True 保持原本行為不變
+            # （一律跑 LLM 潤飾）；新前端的開關預設是 False，會明確帶值。
+            "enable_llm_refine": _parse_bool(request.form.get("enable_llm_refine"), True),
             "user_email": request.user_email,
             "project": _require_project_id(request.form.get("project")),
         }
-        _validate_project_and_model(settings["project"], settings["model"])
+        # 潤飾關掉的話完全不會呼叫任何 model，project/model 的額度與白名單
+        # 規則（_validate_project_and_model）自然也不適用——不驗證，避免
+        # 表單上鎖住、實際沒在用的 model 欄位殘留舊選擇（例如切換到個人
+        # 專案前選過 Claude）反而擋下這次「根本不會呼叫 model」的請求。
+        if settings["enable_llm_refine"]:
+            _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -554,10 +562,12 @@ def create_job_from_ocr_text():
                 "max_retry",
             ),
             "file_name": data.get("file_name"),
+            "enable_llm_refine": _parse_bool(data.get("enable_llm_refine"), True),
             "user_email": request.user_email,
             "project": _require_project_id(data.get("project")),
         }
-        _validate_project_and_model(settings["project"], settings["model"])
+        if settings["enable_llm_refine"]:
+            _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

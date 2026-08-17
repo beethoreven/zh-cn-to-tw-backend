@@ -254,10 +254,17 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     user_email = settings.get("user_email")
     file_name = settings.get("file_name")
     project = settings.get("project")
+    # 使用者主動關掉 LLM 潤飾（懷疑/確認潤飾會整段改寫或刪除內容時的
+    # 逃生門）——不是「額度用盡」那種被動 fallback，是從第一批就直接
+    # 跳過，只保留決定性的 OpenCC 簡轉繁。預設 True（維持舊行為），舊版
+    # 前端/桌面殼沒帶這個欄位時等同沒開這個功能。
+    enable_llm_refine = settings.get("enable_llm_refine", True)
 
     batch_size = _resolve_batch_size(batch_pages_setting, total_pages)
     if batch_pages_setting == config.WHOLE_BOOK_SENTINEL:
         job_manager.append_log(job_id, f"批次模式：整本丟（{total_pages} 頁當一批）")
+    if not enable_llm_refine:
+        job_manager.append_log(job_id, "已關閉 LLM 潤飾，全程只做 OpenCC 簡轉繁")
 
     refined_chunks = []
     batch_list = list(_batches(raw_pages, batch_size))
@@ -267,7 +274,7 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     # 重試只是浪費時間（每批都要等完整的退避重試才會放棄）——確定用盡後
     # 直接跳過 LLM 呼叫，剩下的批次只做決定性的 OpenCC 簡轉繁，把已經
     # 做出來的成果盡快組起來給使用者，而不是繼續卡在注定失敗的重試上。
-    stop_calling_llm = False
+    stop_calling_llm = not enable_llm_refine
 
     for batch_no, (start_idx, page_group) in enumerate(batch_list, start=1):
         page_range = f"{start_idx + 1}-{start_idx + len(page_group)}"
@@ -280,9 +287,10 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
         try:
             traditional_text = convert_to_traditional(raw_batch_text)
             if stop_calling_llm:
-                job_manager.append_log(
-                    job_id, f"批次 {batch_no} 額度已用盡，跳過 LLM 潤飾，只做簡轉繁"
-                )
+                if enable_llm_refine:
+                    job_manager.append_log(
+                        job_id, f"批次 {batch_no} 額度已用盡，跳過 LLM 潤飾，只做簡轉繁"
+                    )
                 final_text = traditional_text
             else:
                 final_text, quota_exhausted = _refine_and_correct(
