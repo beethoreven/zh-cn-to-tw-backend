@@ -445,6 +445,13 @@ def _parse_model(raw_value):
 def _parse_bool(raw_value, default: bool) -> bool:
     if raw_value is None or raw_value == "":
         return default
+    # 表單資料（request.form.get）永遠是字串，但 JSON body（request.get_json）
+    # 帶的布林值會被解析成真正的 Python bool，沒有 .lower()，直接呼叫會是
+    # AttributeError（實測撞過：/api/jobs/from-ocr-text 送 JSON true/false，
+    # 桌面殼端因此收到 500，Safari 把非 JSON 的錯誤頁內容拿去 res.json()
+    # 又炸出另一個看不出關聯的 "did not match the expected pattern"）。
+    if isinstance(raw_value, bool):
+        return raw_value
     return raw_value.lower() in ("true", "1", "on")
 
 
