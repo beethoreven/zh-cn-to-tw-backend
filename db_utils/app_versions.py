@@ -10,7 +10,7 @@ from db_utils.connection import get_ready_conn, sql
 
 
 def get_policy(os_name: str, os_version: str) -> dict | None:
-    """回傳指定作業系統/分流（os_version，例如 '13+'、'12-'——同一個 os
+    """回傳指定作業系統/分流（os_version，例如 '11+'、'10.15'——同一個 os
     可能有好幾包各自獨立發版的 build）的版本門檻，查無資料回傳 None
     （呼叫端應該視為「沒有門檻資訊，不擋」，不要讓查詢失敗變成使用者
     連工作都開始不了）。"""
