@@ -176,6 +176,24 @@ def ta_notice():
     return jsonify({"text": text})
 
 
+_DOWNLOAD_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "download_notice.txt")
+
+
+@app.get("/api/download_notice")
+def download_notice():
+    """下載頁（zh-cn-to-tw-web 的 update-page 分支）的「安裝說明」純文字
+    內容，跟 /api/ta-notice 同一個模式：直接讀這個 repo 根目錄的
+    download_notice.txt，維護者編輯那份檔案、commit、push、在 Render
+    手動觸發部署即可生效，不用碰程式邏輯、不用重新打包桌面版。刻意不
+    要求登入——下載頁本身就是給還沒登入、甚至還沒安裝 App 的人看的。"""
+    try:
+        with open(_DOWNLOAD_NOTICE_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    return jsonify({"text": text})
+
+
 _UPDATE_URL = "https://beethoreven.github.io/zh-cn-to-tw-web/"
 
 
