@@ -398,12 +398,25 @@ def get_project_usage(project_id):
     """回傳這個劇本案累積至今的 Claude token 用量與估計台幣費用，
     給主介面「本案使用 Claude token 狀況」用。只有這個專案的負責人或
     管理員能查——不然任何登入者都能靠猜連續整數 ID（1, 2, 3...）看到
-    別人專案的用量／費用資料，等於跨客戶資料外洩。"""
+    別人專案的用量／費用資料，等於跨客戶資料外洩。
+
+    例外：PERSONAL_PROJECT_ID 是所有人共用的個人專案，沒有負責人可
+    比對，任何登入者都能查（見 config.PERSONAL_PROJECT_ID 的說明，
+    這裡刻意用固定 id 判斷，不是 owner IS NULL）。實測撞過：漏掉這個
+    特例時 `project["owner"] != user_id` 對任何使用者都是 True（None
+    不等於任何整數），個人專案的用量查詢對所有非管理員一律 403，前端
+    res.ok 又沒檢查，後續 renderClaudeUsageRows 對 undefined 的
+    data.models 直接炸例外，用量面板整個壞掉。"""
     project = admin_projects.get_project(project_id)
     if project is None:
         return jsonify({"error": "找不到這個專案"}), 404
     user_id = whitelist.get_user_id(request.user_email)
-    if project["owner"] != user_id and not whitelist.is_admin_user(request.user_email):
+    is_personal_project = project_id == config.PERSONAL_PROJECT_ID
+    if (
+        not is_personal_project
+        and project["owner"] != user_id
+        and not whitelist.is_admin_user(request.user_email)
+    ):
         return jsonify({"error": "沒有權限查看這個專案的用量"}), 403
     return jsonify(_claude_usage_response(lambda model: get_project_token_usage(project_id, model)))
 
@@ -485,17 +498,19 @@ def _require_project_id(raw_value) -> int:
 def _validate_project_and_model(project_id: int, model: str) -> None:
     """檢查這次呼叫的 project/model 組合合不合規則，不合規就拋
     ValueError（呼叫端都已經在 try/except ValueError 裡，會被接住轉成
-    400）。目前只有「個人專案」（projects.owner 是 NULL、所有人共用的
-    那個特殊專案）有這些額外限制：不能用 Claude model，Gemini 3.6
-    Flash 每天有獨立的低額度——這個專案沒有負責人可以追蹤是誰在用，
-    這些限制是為了不讓它變成白嫖 Claude/洗爆 Gemini 額度的後門。
+    400）。目前只有「個人專案」（config.PERSONAL_PROJECT_ID，所有人
+    共用的那個特殊專案）有這些額外限制：不能用 Claude model，Gemini
+    3.6 Flash 每天有獨立的低額度——這個專案沒有負責人可以追蹤是誰在
+    用，這些限制是為了不讓它變成白嫖 Claude/洗爆 Gemini 額度的後門。
     前端在選到這個專案時也會把 Claude 選項從選單拿掉，這裡是後端這層
-    真正擋掉未授權存取的地方（前端只是視覺提示）。"""
+    真正擋掉未授權存取的地方（前端只是視覺提示）。刻意用固定 id 判斷
+    是不是個人專案，不是 owner IS NULL——見 config.PERSONAL_PROJECT_ID
+    的說明。"""
     project = admin_projects.get_project(project_id)
     if project is None:
         raise ValueError(f"找不到 id={project_id} 的專案")
-    if project["owner"] is not None:
-        return  # 一般專案（有負責人）沒有這些額外限制
+    if project_id != config.PERSONAL_PROJECT_ID:
+        return  # 一般專案沒有這些額外限制
 
     if model.startswith("claude"):
         raise ValueError("個人專案不能使用 Claude Model")

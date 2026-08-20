@@ -101,10 +101,20 @@ RPD_LIMITS = {
     "gemini-3.5-flash-lite": int(os.environ.get("GEMINI_3_5_FLASH_LITE_RPD_LIMIT", "500")),
 }
 
-# 「個人專案」（projects.owner 是 NULL、所有人共用的那個特殊專案）底下
-# Gemini 3.6 Flash 每天可以打幾次，比一般專案嚴格很多——這個專案沒有
-# 負責人可以追蹤是誰在用，用這個低額度避免被拿來當白嫖/洗爆額度的後門。
-# 特意不做成 DB 可調設定，就是不希望它跟一般的權限額度混在一起管理。
+# 「個人專案」：所有登入者共用的特殊專案，沒有負責人可以追蹤是誰在用。
+# 用固定的 id（不是 owner IS NULL）判斷是不是這個專案——owner IS NULL
+# 理論上還可能對到「剛建立、還沒指派負責人」的一般專案（雖然目前
+# admin_create_project 的 _require_owner_id 會擋掉這種情況，一律要求
+# 建立時就帶真正的 owner，但這只是現在的實作剛好沒開放那條路，不是
+# 結構性保證），用固定 id 判斷完全不受這個影響。這個專案本身是直接
+# 手動寫進 DB 的，不是透過一般的建立流程，所以「id 固定」是可以放心
+# 依賴的前提。
+PERSONAL_PROJECT_ID = 1
+
+# 個人專案底下 Gemini 3.6 Flash 每天可以打幾次，比一般專案嚴格很多——
+# 這個專案沒有負責人可以追蹤是誰在用，用這個低額度避免被拿來當白嫖/
+# 洗爆額度的後門。特意不做成 DB 可調設定，就是不希望它跟一般的權限
+# 額度混在一起管理。
 PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT = int(
     os.environ.get("PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT", "6")
 )
