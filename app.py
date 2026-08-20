@@ -485,6 +485,22 @@ def _parse_bool(raw_value, default: bool) -> bool:
     return raw_value.lower() in ("true", "1", "on")
 
 
+def _parse_refine_switches(source) -> dict:
+    """Stage 1 的兩個潤飾開關。`source` 是 request.form 或 JSON dict，兩邊
+    都有 .get，可以共用同一支（一般網頁上傳走表單、桌面殼走 JSON）。
+
+    enable_llm_refine 預設 True 維持舊行為；enable_preprocess 預設「跟
+    enable_llm_refine 一樣」而不是寫死 True——舊版前端/桌面殼不會帶
+    enable_preprocess，寫死 True 會讓那些明確關掉潤飾的舊請求突然開始
+    呼叫 LLM（使用者沒要求、還要付費）。這個預設規則跟
+    pipeline/orchestrator.py 的 run_refine_stage 一致，兩邊要一起改。"""
+    enable_llm_refine = _parse_bool(source.get("enable_llm_refine"), True)
+    return {
+        "enable_llm_refine": enable_llm_refine,
+        "enable_preprocess": _parse_bool(source.get("enable_preprocess"), enable_llm_refine),
+    }
+
+
 def _require_project_id(raw_value) -> int:
     """每次呼叫 model 的請求都要帶上目前選定的劇本案 ID，寫進 usage_log.project，
     才能在主介面顯示「本案使用 Claude token 狀況」。前端在使用者確認劇本案之前
@@ -550,17 +566,15 @@ def create_job():
             ),
             "file_name": file.filename,
             "detect_cover": _parse_bool(request.form.get("detect_cover"), config.COVER_DETECT_DEFAULT),
-            # 舊版前端/桌面殼不會帶這個參數，預設 True 保持原本行為不變
-            # （一律跑 LLM 潤飾）；新前端的開關預設是 False，會明確帶值。
-            "enable_llm_refine": _parse_bool(request.form.get("enable_llm_refine"), True),
             "user_email": request.user_email,
             "project": _require_project_id(request.form.get("project")),
+            **_parse_refine_switches(request.form),
         }
-        # 潤飾關掉的話完全不會呼叫任何 model，project/model 的額度與白名單
-        # 規則（_validate_project_and_model）自然也不適用——不驗證，避免
-        # 表單上鎖住、實際沒在用的 model 欄位殘留舊選擇（例如切換到個人
-        # 專案前選過 Claude）反而擋下這次「根本不會呼叫 model」的請求。
-        if settings["enable_llm_refine"]:
+        # 兩個開關都關的話完全不會呼叫任何 model，project/model 的額度與
+        # 白名單規則（_validate_project_and_model）自然也不適用——不驗證，
+        # 避免表單上鎖住、實際沒在用的 model 欄位殘留舊選擇（例如切換到
+        # 個人專案前選過 Claude）反而擋下這次「根本不會呼叫 model」的請求。
+        if settings["enable_preprocess"] or settings["enable_llm_refine"]:
             _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -601,11 +615,11 @@ def create_job_from_ocr_text():
                 "max_retry",
             ),
             "file_name": data.get("file_name"),
-            "enable_llm_refine": _parse_bool(data.get("enable_llm_refine"), True),
             "user_email": request.user_email,
             "project": _require_project_id(data.get("project")),
+            **_parse_refine_switches(data),
         }
-        if settings["enable_llm_refine"]:
+        if settings["enable_preprocess"] or settings["enable_llm_refine"]:
             _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -828,6 +842,10 @@ def _parse_review_settings(form):
             config.MAX_RETRY_MAX,
             "max_retry",
         ),
+        # 「進行前置處理」：同一次校對呼叫裡順便把斷句與標點整理掉（直接
+        # 生效，不進使用者勾選清單）。舊版前端/桌面殼不會帶這個參數，
+        # 預設 False 維持原本行為不變。
+        "enable_preprocess": _parse_bool(form.get("enable_preprocess"), False),
         # request 是 Flask 的 context-local proxy，這支函式只會在
         # request-handling 的路由裡被呼叫，直接拿 request.user_email
         # 是安全的（require_auth 裝飾器已經驗證過並存進去）
@@ -896,6 +914,12 @@ def rerun_review(review_id):
         settings = _parse_review_settings(request.form)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    # 前置處理（接合斷句、全形標點、整理引號）同一份文字做一次就夠了：
+    # 這裡拿到的 text 已經是上一輪前置處理過、再套用使用者勾選建議之後的
+    # 版本，再整理一次只是多花一次額度、還可能把已經整理好的東西改壞。
+    # 不管前端傳什麼一律強制關閉，不給覆寫的機會。
+    settings["enable_preprocess"] = False
 
     source_job = job_manager.get_job(review["source_job_id"])
     file_name = _basename_from_original(

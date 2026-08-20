@@ -110,6 +110,22 @@ def set_chunk_offsets(review_id: str, chunk_offsets: list[tuple[int, int]]):
     _persist(review_id)
 
 
+def set_preprocessed_source(review_id: str, text: str, chunk_offsets: list[tuple[int, int]]):
+    """「進行前置處理」跑完後呼叫：整理過的文字才是這個 review 之後的基準。
+
+    source_text 跟 chunk_offsets 一定要一起換，兩者是同一份文字的內容與
+    索引，分開更新會讓 apply_selected 依錯誤的位置切片。findings 裡的
+    original 引用的也是整理後的文字（見 review/prompts.py），所以換完之後
+    套用勾選、下載、重新校對全部自然吃到整理後的版本。"""
+    with _lock:
+        review = _reviews.get(review_id)
+        if review is None:
+            return
+        review["source_text"] = text
+        review["chunk_offsets"] = chunk_offsets
+    _persist(review_id)
+
+
 def set_findings(review_id: str, findings: list[dict]):
     with _lock:
         review = _reviews.get(review_id)

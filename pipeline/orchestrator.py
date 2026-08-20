@@ -29,6 +29,7 @@ from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
 from llm_utils import claude_client, gemini_client
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
+from llm_utils.prompts import resolve_refine_items
 from output_utils.text_normalize import normalize_paragraph_breaks
 from validators.simplified_check import find_residual_simplified
 
@@ -53,6 +54,7 @@ def _refine_and_correct(
     user_email,
     file_name: str | None,
     project: int | None,
+    items: frozenset[int],
 ) -> tuple[str, bool]:
     """呼叫 LLM 潤飾並用 OpenCC 校正，回傳 (最終文字, 這個 model 的額度是否
     已用盡)；絕不拋出例外，任何失敗都退回 traditional_text（純 OpenCC
@@ -70,7 +72,12 @@ def _refine_and_correct(
                 job_id, f"批次 {batch_no} 第 {attempt} 次呼叫 {model} 潤飾"
             )
             refined = refine_fn(
-                traditional_text, model=model, user_email=user_email, file_name=file_name, project=project
+                traditional_text,
+                model=model,
+                user_email=user_email,
+                file_name=file_name,
+                project=project,
+                items=items,
             )
             break
         except OutputTruncatedError as exc:
@@ -254,17 +261,33 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     user_email = settings.get("user_email")
     file_name = settings.get("file_name")
     project = settings.get("project")
-    # 使用者主動關掉 LLM 潤飾（懷疑/確認潤飾會整段改寫或刪除內容時的
-    # 逃生門）——不是「額度用盡」那種被動 fallback，是從第一批就直接
-    # 跳過，只保留決定性的 OpenCC 簡轉繁。預設 True（維持舊行為），舊版
-    # 前端/桌面殼沒帶這個欄位時等同沒開這個功能。
+    # 兩個獨立開關，各自對應一組潤飾項目（見 llm_utils/prompts.py）：
+    # - enable_preprocess：移除頁碼與標頭、接合斷句、全形標點與引號（項目 1/2/3）
+    # - enable_llm_refine：修正 OCR 誤植錯字（項目 4/5），有改寫內容的風險
+    # 兩個都關就完全不呼叫 LLM，只保留決定性的 OpenCC 簡轉繁。
+    #
+    # enable_llm_refine 預設 True 維持舊行為；enable_preprocess 預設「跟
+    # enable_llm_refine 一樣」而不是寫死 True——舊版前端/桌面殼不會帶
+    # enable_preprocess，如果寫死 True，那些明確關掉潤飾的舊請求會突然
+    # 開始呼叫 LLM（使用者沒要求、還要付費），跟著 enable_llm_refine 走
+    # 才是兩種舊情況都完全不變。
     enable_llm_refine = settings.get("enable_llm_refine", True)
+    enable_preprocess = settings.get("enable_preprocess", enable_llm_refine)
+    refine_items = resolve_refine_items(enable_preprocess, enable_llm_refine)
 
     batch_size = _resolve_batch_size(batch_pages_setting, total_pages)
     if batch_pages_setting == config.WHOLE_BOOK_SENTINEL:
         job_manager.append_log(job_id, f"批次模式：整本丟（{total_pages} 頁當一批）")
-    if not enable_llm_refine:
-        job_manager.append_log(job_id, "已關閉 LLM 潤飾，全程只做 OpenCC 簡轉繁")
+    if not refine_items:
+        job_manager.append_log(job_id, "前置處理與 LLM 潤飾都已關閉，全程只做 OpenCC 簡轉繁")
+    else:
+        job_manager.append_log(
+            job_id,
+            "本次處理項目："
+            + ("前置處理（移除頁碼與標頭、接合斷句、全形標點、整理引號）" if enable_preprocess else "")
+            + ("＋" if enable_preprocess and enable_llm_refine else "")
+            + ("LLM 潤飾（修正 OCR 誤植錯字）" if enable_llm_refine else ""),
+        )
 
     refined_chunks = []
     batch_list = list(_batches(raw_pages, batch_size))
@@ -274,7 +297,7 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     # 重試只是浪費時間（每批都要等完整的退避重試才會放棄）——確定用盡後
     # 直接跳過 LLM 呼叫，剩下的批次只做決定性的 OpenCC 簡轉繁，把已經
     # 做出來的成果盡快組起來給使用者，而不是繼續卡在注定失敗的重試上。
-    stop_calling_llm = not enable_llm_refine
+    stop_calling_llm = not refine_items
 
     for batch_no, (start_idx, page_group) in enumerate(batch_list, start=1):
         page_range = f"{start_idx + 1}-{start_idx + len(page_group)}"
@@ -287,14 +310,22 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
         try:
             traditional_text = convert_to_traditional(raw_batch_text)
             if stop_calling_llm:
-                if enable_llm_refine:
+                if refine_items:
                     job_manager.append_log(
-                        job_id, f"批次 {batch_no} 額度已用盡，跳過 LLM 潤飾，只做簡轉繁"
+                        job_id, f"批次 {batch_no} 額度已用盡，跳過 LLM 處理，只做簡轉繁"
                     )
                 final_text = traditional_text
             else:
                 final_text, quota_exhausted = _refine_and_correct(
-                    job_id, batch_no, traditional_text, model, max_retry, user_email, file_name, project
+                    job_id,
+                    batch_no,
+                    traditional_text,
+                    model,
+                    max_retry,
+                    user_email,
+                    file_name,
+                    project,
+                    refine_items,
                 )
                 if quota_exhausted:
                     stop_calling_llm = True

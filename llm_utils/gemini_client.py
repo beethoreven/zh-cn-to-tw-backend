@@ -14,8 +14,8 @@ from google.genai import types
 from configs import config
 from llm_utils.call_timeout import call_with_timeout
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
-from llm_utils.prompts import REFINE_PROMPT
-from review.prompts import REVIEW_PROMPT
+from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_prompt
+from review.prompts import PREPROCESS_REVIEW_PROMPT, REVIEW_PROMPT
 from usage.usage_log import record_usage
 
 _client = None
@@ -105,8 +105,11 @@ def refine_text(
     user_email: str | None = None,
     file_name: str | None = None,
     project: int | None = None,
+    items: frozenset[int] | None = None,
 ) -> str:
-    prompt = REFINE_PROMPT.format(text=text)
+    """items 是這次要套用的潤飾項目（見 llm_utils/prompts.py），由
+    orchestrator 依「進行前置處理」「進行LLM潤飾」兩個開關算出來。"""
+    prompt = build_refine_prompt(text, items or ALL_REFINE_ITEMS)
     return _generate(prompt, model, user_email, file_name=file_name, project=project)
 
 
@@ -116,9 +119,13 @@ def review_text(
     user_email: str | None = None,
     file_name: str | None = None,
     project: int | None = None,
+    enable_preprocess: bool = False,
 ) -> str:
-    """Stage 2 校對：回傳 LLM 原始輸出（應為 JSON 陣列字串），由呼叫端解析。"""
-    prompt = REVIEW_PROMPT.format(text=text)
+    """Stage 2 校對：回傳 LLM 原始輸出，由呼叫端解析。
+
+    enable_preprocess=False 時輸出是 JSON 陣列（校對建議）；True 時輸出是
+    JSON 物件（前置處理後的文字 + 校對建議），見 review/prompts.py。"""
+    prompt = (PREPROCESS_REVIEW_PROMPT if enable_preprocess else REVIEW_PROMPT).format(text=text)
     return _generate(
         prompt, model, user_email, response_mime_type="application/json", file_name=file_name, project=project
     )
