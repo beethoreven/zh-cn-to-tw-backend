@@ -212,7 +212,7 @@ def _ensure_app_versions(cur) -> None:
         CREATE TABLE IF NOT EXISTS app_versions (
             id SERIAL PRIMARY KEY,
             os TEXT NOT NULL,
-            os_version TEXT NOT NULL DEFAULT '13+',
+            os_version TEXT NOT NULL,
             latest_major INTEGER NOT NULL,
             latest_minor INTEGER NOT NULL,
             min_major INTEGER NOT NULL,
@@ -238,30 +238,29 @@ def _ensure_app_versions(cur) -> None:
             "ADD CONSTRAINT app_versions_os_os_version_key UNIQUE (os, os_version)"
         )
 
-    # 舊環境既有那一筆是目前唯一在發的 build（macOS 13+），os_version
-    # 過去沒在用，多半是 NULL——補成 '13+' 才會正確落在新的分流鍵裡。
-    # 全新環境走上面 CREATE TABLE 的 DEFAULT '13+' 就直接是對的，這裡
-    # 對全新環境是無資料可改的空跑。補完之後才能把欄位鎖成 NOT NULL——
-    # 複合唯一鍵允許多筆 NULL 同時存在（Postgres 的 NULL 互不相等），
-    # os_version 是 NULL 的話「同一個 os 只能一筆」這個舊限制其實還是
-    # 沒解除。
+    # 歷史一次性遷移殘留：早期環境唯一一筆資料的 os_version 過去沒在
+    # 用，是 NULL，當初補成 '13+' 才能正確落在新的分流鍵裡。這筆資料
+    # 現在已經改名成 '11+'（見下方說明），不會再有 NULL 需要補，這段
+    # UPDATE 對正式環境是無資料可改的空跑，留著純粹冪等、無副作用。
+    # 補完之後才能把欄位鎖成 NOT NULL——複合唯一鍵允許多筆 NULL 同時
+    # 存在（Postgres 的 NULL 互不相等），os_version 是 NULL 的話「同一
+    # 個 os 只能一筆」這個舊限制其實還是沒解除。
     cur.execute(
         "UPDATE app_versions SET os_version = '13+' "
         "WHERE os = 'macos' AND os_version IS NULL"
     )
     cur.execute("ALTER TABLE app_versions ALTER COLUMN os_version SET NOT NULL")
 
-    cur.execute("SELECT COUNT(*) FROM app_versions WHERE os = 'macos' AND os_version = '13+'")
-    if cur.fetchone()[0] == 0:
-        # 種子值等於目前實際出的版本（1.0，第一個正式發布的版本）——
-        # 上線當下不會有任何人被強制要求更新，門檻要手動調整（之後出
-        # 新版、決定要不要強制大家升級時）才會生效。這個種子值只有在
-        # 這個 (os, os_version) 組合還沒有資料時才會用到，正式環境的
-        # 門檻是直接 UPDATE/INSERT 這張表調整，不會重跑這段程式碼——
-        # 12- 那包（macOS 12 以下、只給 Stage 2）等實際 build 出來、
-        # 定版號時再手動 INSERT 一筆，不在這裡預先埋。
-        cur.execute(
-            "INSERT INTO app_versions "
-            "(os, os_version, latest_major, latest_minor, min_major, min_minor) "
-            "VALUES ('macos', '13+', 1, 0, 1, 0)"
-        )
+    # 這張表刻意不在這裡自動補種子資料。version_check API（見 app.py）
+    # 對查無門檻資料的 (os, os_version) 組合本來就設計成一律不擋
+    # （force_update: False），完全沒有資料不影響任何人；每個分流的
+    # 門檻要有意義的值時，直接手動 INSERT/UPDATE 這張表（見
+    # update_version skill），不要在這裡自動生。
+    #
+    # 這裡曾經有一段「查無 os_version='13+' 就自動種一筆預設值
+    # (1.0, 1.0)」的邏輯，是最早從「每個 os 一列」升級成 (os,
+    # os_version) 複合鍵時的一次性遷移殘留。後來 13+ 分流改名成 11+
+    # 之後（zh-cn-to-tw-mac 1.3），DB 裡再也沒有 os_version='13+' 的
+    # 資料，這段「查無就補」的判斷條件從此永遠成立，變成每次 backend
+    # 啟動都會憑空重新種出一筆過期、沒有任何 client 會查到的
+    # (macos, '13+', ...) 死資料（2026-08-21 發現、移除）。
