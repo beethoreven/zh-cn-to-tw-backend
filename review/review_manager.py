@@ -37,16 +37,25 @@ def create_review(
     source_text: str,
     exclude_fingerprints: list | None = None,
     user_email: str | None = None,
+    file_name: str | None = None,
 ) -> str:
     """exclude_fingerprints：從上一輪（或更早幾輪）繼承下來、使用者已經
     明確不想套用的建議指紋（[original, suggested] 這種形式），這一輪
-    校對時要濾掉，避免同樣被使用者否決過的建議一直重複出現。"""
+    校對時要濾掉，避免同樣被使用者否決過的建議一直重複出現。
+
+    file_name：下載時要用的檔名（不含副檔名）。這裡刻意存一份自己的，
+    不要下載時才回頭查上游那個 Stage 1 job——jobs 表有 24 小時保留期
+    （job_store.RETENTION_HOURS），而上游 job 的 updated_at 一定比這個
+    review 早，所以它會先被清掉。實測撞過：一個 Stage 2 任務放了兩三天
+    才下載，review 自己還在、下載得出來，但上游 job 已經過期消失，檔名
+    退回用 review_id（uuid 前 12 碼）當名字，變成一串英數字亂碼。"""
     review_id = uuid.uuid4().hex[:12]
     with _lock:
         _reviews[review_id] = {
             "id": review_id,
             "source_job_id": source_job_id,
             "source_text": source_text,
+            "file_name": file_name,
             "status": "pending",  # pending | running | done | failed
             "logs": [],
             "findings": [],  # [{id, batch, original, suggested, context, reason}]

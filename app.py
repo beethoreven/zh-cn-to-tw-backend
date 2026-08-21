@@ -866,6 +866,7 @@ def _launch_review(
         text,
         exclude_fingerprints=exclude_fingerprints,
         user_email=settings.get("user_email"),
+        file_name=file_name,
     )
     run_settings = dict(settings, exclude_fingerprints=exclude_fingerprints or [], file_name=file_name)
     thread = threading.Thread(
@@ -1006,10 +1007,15 @@ def download_review(review_id):
     text = review["applied_text"] or review["source_text"]
     fmt = request.args.get("format", "txt").lower()
 
-    source_job = job_manager.get_job(review["source_job_id"])
-    original_filename = source_job.get("original_filename") if source_job else None
-    basename = _download_basename(original_filename, review_id)
-    return _send_text_as(text, fmt, basename)
+    # 優先用 review 自己存的檔名。回頭查上游 Stage 1 job 只是給改版前
+    # 建立、沒有這個欄位的舊 review 用的 fallback——那條路不可靠，jobs
+    # 表有 24 小時保留期而上游 job 一定比 review 早過期，放久了就查不到、
+    # 檔名會退化成 review_id 那串亂碼（見 review_manager.create_review）。
+    basename = review.get("file_name")
+    if not basename:
+        source_job = job_manager.get_job(review["source_job_id"])
+        basename = source_job.get("original_filename") if source_job else None
+    return _send_text_as(text, fmt, _download_basename(basename, review_id))
 
 
 # --- 管理員介面 ---
