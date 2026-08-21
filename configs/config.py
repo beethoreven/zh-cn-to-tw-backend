@@ -70,6 +70,20 @@ REFINE_BATCH_PAGES = os.environ.get("REFINE_BATCH_PAGES", "20")
 # 單一批次 API 呼叫失敗（網路/暫時性錯誤）最多重試幾次
 REFINE_MAX_RETRY = int(os.environ.get("REFINE_MAX_RETRY", "3"))
 
+# Stage 1 潤飾後的長度下限，用「潤飾後字數 / 潤飾前字數」判斷 LLM 有沒有
+# 自作主張把內容摘要、節錄或中途停掉（prompt 已經明講不可以，但不保證它
+# 會聽，見 pipeline/orchestrator.py 的 _refine_and_correct）。
+#
+# 低於 MIN 直接不採用這批潤飾結果、退回純 OpenCC 簡轉繁的版本：內容被吃掉
+# 是永久性的資料損失，比「這批沒潤飾到」嚴重得多。低於 WARN 但高於 MIN 則
+# 保留結果、只寫一條 warning log——正常移除頁碼標頭本來就會少掉幾 %，不該
+# 因此丟掉已經付費算出來的潤飾，但要讓使用者看得到數字自己判斷。
+#
+# MIN 的 0.7 跟 Stage 2 的 review/reviewer.py `_MIN_PROCESSED_RATIO` 用同一個
+# 數字，兩邊講的是同一件事（LLM 把整批文字摘要掉），刻意不分岔成兩個值。
+REFINE_MIN_OUTPUT_RATIO = float(os.environ.get("REFINE_MIN_OUTPUT_RATIO", "0.7"))
+REFINE_WARN_OUTPUT_RATIO = float(os.environ.get("REFINE_WARN_OUTPUT_RATIO", "0.9"))
+
 # PDF 轉圖片時的解析度，越高辨識越準但越慢
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 

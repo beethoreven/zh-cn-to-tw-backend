@@ -148,6 +148,43 @@ def _refine_and_correct(
         # 都用 OpenCC 再校正一次，確保絕對不會有殘留簡體字，這一步是
         # 本機決定性運算，不需要也不會再多打一次 API
         corrected = convert_to_traditional(refined)
+
+        # 潤飾前後的長度比對。跟上面「不管 LLM 做得好不好都再跑一次
+        # OpenCC」同一個思路：prompt 寫得再清楚都只是要求，這裡用決定性
+        # 運算實際驗證它有沒有照做。比較基準兩邊都是 OpenCC 處理過的狀態
+        # （traditional_text 是 LLM 前、corrected 是 LLM 後），長度可比。
+        #
+        # 分兩層是因為兩種情況的嚴重度差很多：整批被摘要/截斷掉是永久性
+        # 的資料損失，寧可退回沒潤飾的版本；掉個幾 % 則可能是正常移除頁碼
+        # 標頭的結果，不該因此丟掉已經付費算出來的潤飾，但要留下痕跡讓
+        # 使用者自己判斷（job log 前端看得到）。
+        #
+        # 要講清楚這層檢查抓得到什麼：它抓的是災難性損失。一個批次掉個
+        # 幾行可能只少 5%，低於門檻但不會被攔下來——那種情況真正的防線是
+        # prompt 本身（見 llm_utils/prompts.py 第 2/5 條的說明），這裡是
+        # 補「整段被吃掉」這個原本完全沒有防護的情況。
+        before_len = len(traditional_text.strip())
+        after_len = len(corrected.strip())
+        if before_len:
+            ratio = after_len / before_len
+            if ratio < config.REFINE_MIN_OUTPUT_RATIO:
+                job_manager.append_log(
+                    job_id,
+                    f"批次 {batch_no} 潤飾後只剩原文的 {ratio:.0%}"
+                    f"（{before_len} 字 -> {after_len} 字），像是被摘要或截斷了，"
+                    "不予採用，保留 OpenCC 決定性轉換結果（未套用 LLM 潤飾）",
+                    level="error",
+                )
+                return traditional_text, False
+            if ratio < config.REFINE_WARN_OUTPUT_RATIO:
+                job_manager.append_log(
+                    job_id,
+                    f"批次 {batch_no} 潤飾後剩原文的 {ratio:.0%}"
+                    f"（{before_len} 字 -> {after_len} 字），比預期少，"
+                    "如果不是移除頁碼標頭造成的，建議人工檢查這個批次",
+                    level="warning",
+                )
+
         residual = find_residual_simplified(corrected)
         if residual:
             job_manager.append_log(
