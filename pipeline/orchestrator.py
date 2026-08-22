@@ -170,16 +170,16 @@ def _refine_and_correct(
             if ratio < config.REFINE_MIN_OUTPUT_RATIO:
                 job_manager.append_log(
                     job_id,
-                    f"批次 {batch_no} 潤飾後只剩原文的 {ratio:.0%}"
+                    f"批次 {batch_no} 處理後只剩原文的 {ratio:.0%}"
                     f"（{before_len} 字 -> {after_len} 字），像是被摘要或截斷了，"
-                    "不予採用，保留 OpenCC 決定性轉換結果（未套用 LLM 潤飾）",
+                    "不予採用，保留 OpenCC 決定性轉換結果（未套用 LLM 處理）",
                     level="error",
                 )
                 return traditional_text, False
             if ratio < config.REFINE_WARN_OUTPUT_RATIO:
                 job_manager.append_log(
                     job_id,
-                    f"批次 {batch_no} 潤飾後剩原文的 {ratio:.0%}"
+                    f"批次 {batch_no} 處理後剩原文的 {ratio:.0%}"
                     f"（{before_len} 字 -> {after_len} 字），比預期少，"
                     "如果不是移除頁碼標頭造成的，建議人工檢查這個批次",
                     level="warning",
