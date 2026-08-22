@@ -69,7 +69,7 @@ def _refine_and_correct(
     for attempt in range(1, max_retry + 1):
         try:
             job_manager.append_log(
-                job_id, f"批次 {batch_no} 第 {attempt} 次呼叫 {model} 潤飾"
+                job_id, f"批次 {batch_no} 第 {attempt} 次呼叫 {model} 處理"
             )
             refined = refine_fn(
                 traditional_text,
@@ -135,7 +135,7 @@ def _refine_and_correct(
             reason = f"重試 {max_retry} 次後仍呼叫失敗"
         job_manager.append_log(
             job_id,
-            f"批次 {batch_no} {reason}，保留 OpenCC 決定性轉換結果（未套用 LLM 潤飾）"
+            f"批次 {batch_no} {reason}，保留 OpenCC 決定性轉換結果（未套用 LLM 處理）"
             + ("，建議調小批次頁數重新處理這本書" if truncated else "")
             + ("，建議換一個 model 或等額度重置後再處理這本書" if quota_exceeded else "")
             + ("，建議稍後重新處理這本書" if transient_error else ""),
@@ -194,12 +194,12 @@ def _refine_and_correct(
                 level="warning",
             )
         else:
-            job_manager.append_log(job_id, f"批次 {batch_no} 潤飾與校正完成")
+            job_manager.append_log(job_id, f"批次 {batch_no} 處理完成")
         return corrected, False
     except Exception as exc:  # noqa: BLE001
         job_manager.append_log(
             job_id,
-            f"批次 {batch_no} 潤飾後的校正階段發生錯誤：{exc}，改用未潤飾的簡轉繁結果",
+            f"批次 {batch_no} 處理後的校正階段發生錯誤：{exc}，改用未處理的簡轉繁結果",
             level="warning",
         )
         return traditional_text, False
@@ -283,7 +283,7 @@ def run_ocr_stage(job_id: str, pdf_path: str, dpi: int, detect_cover: bool) -> t
         text = ocr_page(image)
         raw_pages.append(text)
 
-    job_manager.append_log(job_id, "全部頁面 OCR 完成，開始分批進行簡轉繁與潤飾")
+    job_manager.append_log(job_id, "全部頁面 OCR 完成，開始分批處理")
     return raw_pages, total_pages
 
 
@@ -369,7 +369,7 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
                     job_manager.append_log(
                         job_id,
                         f"批次 {batch_no} 額度已用盡，重試 {max_retry} 次仍失敗，"
-                        "後續批次直接改用簡轉繁、不再重試 LLM 潤飾",
+                        "後續批次直接改用簡轉繁、不再重試 LLM 處理",
                         level="warning",
                     )
         except Exception as exc:  # noqa: BLE001
