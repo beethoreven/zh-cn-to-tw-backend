@@ -158,15 +158,25 @@ def set_error(review_id: str, error: str):
 
 
 def set_applied_text(review_id: str, text: str):
+    """漏掉 _persist() 曾經是一個真實資料損失：套用完之後、下一次「重新
+    校對」之前，只要 process 重啟過一次（Render 免費方案閒置會自動休眠，
+    喚醒就是全新 process，記憶體全空），applied_text 記憶體裡沒了，回頭
+    查 DB 也查不到（從來沒寫進去過）。rerun_review() 的
+    `review["applied_text"] or review["source_text"]` 這時候就會退回
+    校對前的原文去重新校對，已經套用修好的問題會被重新校對重新抓出來
+    一次，使用者看到的是「明明修過的東西又跑回來了」。"""
     with _lock:
         review = _reviews.get(review_id)
         if review is None:
             return
         review["applied_text"] = text
+    _persist(review_id)
 
 
 def record_rejected_findings(review_id: str, selected_ids: set[int]) -> None:
-    """套用時記錄下使用者沒勾選的建議，供之後重新校對時排除用。"""
+    """套用時記錄下使用者沒勾選的建議，供之後重新校對時排除用。跟
+    set_applied_text 同一個理由要 _persist：process 重啟後這份名單一樣
+    會不見，重新校對就會把使用者已經明確拒絕過的建議再拿出來煩他一次。"""
     with _lock:
         review = _reviews.get(review_id)
         if review is None:
@@ -177,6 +187,7 @@ def record_rejected_findings(review_id: str, selected_ids: set[int]) -> None:
             if f["id"] not in selected_ids
         ]
         review["own_rejected_fingerprints"] = rejected
+    _persist(review_id)
 
 
 def get_combined_exclude_fingerprints(review_id: str) -> list:
