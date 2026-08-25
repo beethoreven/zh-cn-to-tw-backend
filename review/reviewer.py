@@ -14,7 +14,6 @@ import json
 import time
 
 from configs import config
-from llm_utils import claude_client, gemini_client
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from review import review_manager
 
@@ -165,6 +164,12 @@ def _call_review_with_retry(
     前置處理沒開、或這一批失敗時，第一個元素是 None，呼叫端要自己退回這批
     原文。額度用盡的旗標讓呼叫端可以決定要不要放棄剩下的批次，不用每批次
     都重新撞一次已經確定用盡的額度。"""
+    # 在函式內 import，理由見 pipeline/orchestrator.py 的 _refine_and_correct
+    # 同一段說明：anthropic + google.genai 兩個 SDK 佔 import app 總時間的
+    # 約 67%，但只有真的要呼叫 LLM 時才需要，放模組層級等於讓每次 Render
+    # 冷啟動都先付這筆錢。
+    from llm_utils import claude_client, gemini_client
+
     review_fn = claude_client.review_text if model.startswith("claude") else gemini_client.review_text
 
     raw = None

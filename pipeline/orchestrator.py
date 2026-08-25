@@ -27,7 +27,6 @@ import time
 from configs import config
 from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
-from llm_utils import claude_client, gemini_client
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from llm_utils.prompts import resolve_refine_items
 from output_utils.text_normalize import normalize_paragraph_breaks
@@ -60,6 +59,19 @@ def _refine_and_correct(
     已用盡)；絕不拋出例外，任何失敗都退回 traditional_text（純 OpenCC
     結果）。額度用盡的旗標讓呼叫端可以決定要不要乾脆放棄剩下的批次，不用
     每批次都重新撞一次已經確定用盡的額度、白白浪費重試等待時間。"""
+    # 這兩個 client 刻意在函式內 import，不放模組最上面——跟 run_ocr_stage
+    # 延後 import ocr_utils 是同一個手法，但理由不同：那裡是為了不讓
+    # PyInstaller 把用不到的東西打包進去，這裡是為了縮短 Render 的冷啟動。
+    #
+    # 實測（本機）：import app 共 2131ms，其中 anthropic 佔 995ms、
+    # google.genai 佔 429ms，兩者合計約 67%。而 Render 免費方案只有
+    # 0.1 CPU，這段時間會被放大一個數量級。這兩個 SDK 只有真的要呼叫
+    # LLM 時才需要，/api/health、登入、輪詢、版本檢查全都用不到——讓
+    # 每一次冷啟動都替「可能根本不會發生的 LLM 呼叫」預先付這筆錢並
+    # 不合理。延後到這裡，第一次潤飾時才付，而那時使用者本來就在等
+    # 一個以十秒為單位的 LLM 呼叫，多這 1.4 秒察覺不到。
+    from llm_utils import claude_client, gemini_client
+
     refine_fn = claude_client.refine_text if model.startswith("claude") else gemini_client.refine_text
 
     refined = None
