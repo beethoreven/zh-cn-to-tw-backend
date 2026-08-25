@@ -37,9 +37,13 @@ from db_utils.connection import get_ready_conn, sql
 SESSION_IDLE_DAYS = int(os.environ.get("SESSION_IDLE_DAYS", "90"))
 
 # last_seen_at 沒必要每次請求都真的寫一次 DB——前端輪詢 job/review 進度
-# 每 5 秒打一次 API，Neon 單次連線+查詢實測要 1.2-1.6 秒，不節流的話
-# 光是「順便更新一下時間戳記」就會把輪詢拖垮。跟 whitelist.py 的讀取
-# 快取是同樣的考量，這裡反過來對寫入做節流。
+# 每 5 秒打一次 API，不節流的話光是「順便更新一下時間戳記」就會把輪詢
+# 拖垮。跟 whitelist.py 的讀取快取是同樣的考量，這裡反過來對寫入做節流。
+#
+# 當初的量化理由是「Neon 單次連線+查詢實測 1.2-1.6 秒」，那個數字在
+# 2026-08-25 之後不成立了（跨區造成，同區後約 30ms，見
+# db_utils/connection.py 教訓四）。節流保留著——它同時也在省 Neon 免費
+# 方案的寫入量——但不要再拿那個過期數字當理由，要調之前先量現況。
 _TOUCH_MIN_INTERVAL_SECONDS = 60
 _touch_lock = threading.Lock()
 _last_touched: dict[str, float] = {}

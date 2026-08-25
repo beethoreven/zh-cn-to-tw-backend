@@ -52,6 +52,27 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 
 **曾經考慮過、後來放棄的方案**:讓桌面版把整支 backend 也一起打包進 .app（`packaging/backend_service.spec`，已刪除），本機自己跑一份完整的 backend。放棄原因是本機 backend 用 HTTP 供應網頁時，監聽的 port 是每次啟動隨機配的（刻意避免舊 process 卡住固定 port），而 `localStorage` 是照 `scheme+host+port` 算 origin 的——port 每次不一樣，等於使用者每次開 App 登入的 session 都救不回來，變成每次啟動都要重新登入。最後改成桌面殼直接用固定的 `file://` 路徑內嵌網頁（不透過任何本機 HTTP 伺服器），origin 因此穩定；憑證（DB 連線字串、LLM API 金鑰）完全不進桌面版 App，一律留在 Render——這是刻意的安全取捨:客戶端的機密本質上無法真正保護（程式執行時必須能解密才能用，加密只是提高門檻），所以憑證乾脆不下發，桌面版只拿一個範圍有限、可撤銷的 session token。
 
+### 資料庫與 Render 必須同區（2026-08-25 才發現的重大效能問題）
+
+**Neon project 的區域一定要跟 Render service 的區域一致。** 目前兩邊都是 AWS `ap-southeast-1`（新加坡）。這不是最佳化建議，是這個系統效能的主要決定因素。
+
+原本 Render 在新加坡、Neon 卻建在 `us-east-2`（俄亥俄），每次建立資料庫連線都要跨太平洋往返六趟。實測結果:不碰資料庫的 `/api/health` 回應 0.11 秒，只做一個 `COUNT`、不需要登入的 `/api/jobs/active` 卻要 1.76 秒，而且**重複呼叫不會變快**（排除了冷啟動）。更刺眼的是，開發者家用寬頻從台灣連到俄亥俄（199.7ms）比 Render 機房連到自己的資料庫（約 236ms）還快——**機房輸給家用網路，本身就是拓撲有問題的訊號**。
+
+拆穿它的方法是一個比值:用 socket 量純 TCP 握手（`SYN→SYN/ACK` 定義上恰好一個往返）得到 199.7ms，而建立一條 psycopg2 連線是 1228ms，`1228 ÷ 199.7 = 6.15`——剛好對應 TCP(1) + TLS(1-2) + SCRAM(約3) 的往返次數。**商數落在小整數上，代表這個操作裡幾乎沒有運算，全部是網路往返**，而往返的價格由距離決定。這個比值同時排除了另一個競爭假設（Render 免費方案 0.1 CPU 把加密運算節流了），因為那會讓商數遠大於 6。
+
+把資料庫搬到新加坡之後（扣掉 `/api/health` 當基準線）:
+
+| | 遷移前 | 遷移後 |
+|---|---|---|
+| 純資料庫成本 | 1.76 秒 | **0.03 秒** |
+| `/api/jobs/active` | 1.78–1.99 秒 | **0.12–0.21 秒** |
+
+約 **59 倍**。新資料庫獨立驗證了同一個比值（`connect ÷ RTT = 5.98`），兩條完全不同的網路路徑都命中 6，所以那是可重複的判準而不是巧合。
+
+**既有 Neon project 不能改區域**（官方明文），必須在目標區新建 project 再搬資料。搬遷本身很單純:整個資料庫只有 9.6MB、1606 列，而且**客戶端完全不持有資料庫憑證**（前端／Mac／Windows 一律打 Render API），所以要改的只有 Render 的環境變數跟本機 `.env`。
+
+因為距離已經不是瓶頸，兩項原本被排定的最佳化都**刻意不做**:psycopg3 連線池（同區後只能再省約 130ms，卻要引進「Neon 閒置 5 分鐘 suspend 會砍掉池內連線」這個新失效模式），以及把每個已登入請求的 5 條連線減成 2 條（150ms → 60ms，對使用者無感）。完整推論見 `db_utils/connection.py` 的歷史教訓四。
+
 ### 檔案結構
 
 ```
@@ -156,7 +177,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 | 變數 | 必填? | 說明 |
 |---|---|---|
-| `DATABASE_URL` | **必填** | Neon Postgres 連線字串 |
+| `DATABASE_URL` | **必填** | Neon Postgres 連線字串。**Neon project 的區域必須跟 Render service 同區**（目前兩邊都是 `ap-southeast-1` 新加坡），見下面「資料庫與 Render 必須同區」 |
 | `GEMINI_API_KEY` | Stage 1 必填 | Google AI Studio 申請 |
 | `GOOGLE_CLIENT_ID` | 登入功能必填 | Google Cloud Console 的 OAuth Client ID |
 | `ANTHROPIC_API_KEY` | 選填 | 不填就無法選 Claude Haiku 校對 |
@@ -249,6 +270,27 @@ This was the biggest turn the project took, and it took several failed attempts 
 Mitigations tried (all just delayed the problem, none fixed it): pinning PaddleOCR to a single CPU thread, streaming pages one at a time instead of a single memory spike, lowering DPI. These are still in place for the browser path, but the **real fix was moving OCR off Render entirely** — the desktop version offloads it to the user's own machine (`zh-cn-to-tw-ocr-service`), leaving the backend with only what genuinely must stay remote: the database, LLM API keys, login, the admin interface, and job/review state.
 
 **A considered-then-abandoned alternative**: bundling the entire backend into the desktop `.app` too (`packaging/backend_service.spec`, since deleted), running a full local copy. This was abandoned because a locally-run backend serving the web UI over HTTP binds to a randomly-assigned port on each launch (deliberately, to avoid a stale process squatting a fixed port) — and `localStorage` keys origin by `scheme+host+port`. A different port every launch means every launch is effectively a new origin, so the login session stored in `localStorage` could never survive a restart — the user had to log in again every single time. The fix was to have the desktop shell load the web UI from a fixed `file://` path instead (no local HTTP server involved at all), giving it a stable origin. Credentials (the DB connection string, LLM API keys) never ship inside the desktop app at all — they stay on Render exclusively. This was a deliberate security tradeoff: client-side secrets can't actually be protected (the code must be able to decrypt them to use them, so encryption only raises the bar, it doesn't close the door) — so the desktop app is simply never handed anything worth stealing; it only gets a scoped, revocable session token.
+
+### The Database Must Sit in the Same Region as Render (a major performance problem found only on 2026-08-25)
+
+**The Neon project's region must match the Render service's region.** Both are currently AWS `ap-southeast-1` (Singapore). This is not an optimization tip — it is the single biggest determinant of this system's responsiveness.
+
+Render ran in Singapore while Neon had been created in `us-east-2` (Ohio), so every database connection crossed the Pacific six times. Measured: `/api/health`, which touches no database, answered in 0.11 s, while `/api/jobs/active` — one `COUNT`, no authentication — took 1.76 s, and **repeating the call never made it faster** (ruling out cold starts). More glaring still: the developer's home broadband in Taiwan reached Ohio faster (199.7 ms) than Render's datacenter reached its own database (~236 ms) — **a datacenter losing to a residential connection is itself the signal that something is topologically wrong**.
+
+What exposed it was a ratio. A raw TCP handshake measured with `socket` (`SYN→SYN/ACK` is exactly one round trip by definition) came to 199.7 ms, while opening one psycopg2 connection took 1228 ms: `1228 ÷ 199.7 = 6.15`, matching the expected round-trip count for TCP (1) + TLS (1–2) + SCRAM (~3). **A quotient landing on a small integer means the operation contains essentially no computation — it is pure network round trips**, and round trips are priced by distance. The same ratio also ruled out the competing hypothesis that Render's 0.1 CPU was throttling the crypto-heavy handshake, since that would have pushed the quotient far above 6.
+
+After moving the database to Singapore (with `/api/health` subtracted as the baseline):
+
+| | Before | After |
+|---|---|---|
+| Net database cost | 1.76 s | **0.03 s** |
+| `/api/jobs/active` | 1.78–1.99 s | **0.12–0.21 s** |
+
+Roughly **59×**. The new database independently reproduced the same ratio (`connect ÷ RTT = 5.98`); two entirely different network paths both landing on 6 makes this a repeatable diagnostic rather than a coincidence.
+
+**An existing Neon project's region cannot be changed** (stated explicitly in their docs) — you must create a project in the target region and migrate the data. The migration itself was straightforward: the whole database is 9.6 MB across 1606 rows, and **no client holds database credentials** (the web frontend, Mac, and Windows shells all go through the Render API), so the only things needing an update were Render's environment variable and the local `.env`.
+
+Because distance is no longer the bottleneck, two previously-scoped optimizations were **deliberately not done**: a psycopg3 connection pool (worth only ~130 ms more per request once co-located, while introducing a new failure mode — Neon suspends after 5 minutes idle and severs pooled connections), and cutting the 5 connections opened per authenticated request down to 2 (150 ms → 60 ms, imperceptible to users). The full reasoning lives in `db_utils/connection.py`'s fourth historical lesson.
 
 ### File Layout
 
@@ -359,7 +401,7 @@ whether it's required and what it's for. The essentials:
 
 | Variable | Required? | Description |
 |---|---|---|
-| `DATABASE_URL` | **Required** | Neon Postgres connection string |
+| `DATABASE_URL` | **Required** | Neon Postgres connection string. **The Neon project's region must match the Render service's region** (both are currently `ap-southeast-1`, Singapore) — see "The Database Must Sit in the Same Region as Render" above |
 | `GEMINI_API_KEY` | Required for Stage 1 | From Google AI Studio |
 | `GOOGLE_CLIENT_ID` | Required for login | OAuth Client ID from Google Cloud Console |
 | `ANTHROPIC_API_KEY` | Optional | Without it, Claude Haiku proofreading is unavailable |
