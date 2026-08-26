@@ -80,6 +80,25 @@ def get_user_auth_info(email: str | None) -> dict | None:
     return result
 
 
+def invalidate_cache(email: str | None) -> None:
+    """把這個 email 的授權快取立刻失效，不等 TTL 自然過期。
+
+    管理員停用帳號時一定要呼叫，否則「刪掉 session」這個動作是無效的：
+    使用者被登出後可以立刻重新登入，而 /auth/login 走的是同一支
+    is_permitted_user()，快取命中時仍然回傳「active」，於是又拿到一個
+    全新的 session——繞了一圈，停用還是要等 TTL 到期才真的生效。
+
+    這個快取是行程內的。目前 Render 是單一 process（Start Command 是
+    `python3 app.py`，Flask 內建伺服器 threaded=True），所以清一次就
+    夠了；哪天改成多 worker（gunicorn 之類），每個 process 各有一份
+    快取，這裡就只清得掉自己那一份，屆時要改成走共用儲存或縮短 TTL。
+    """
+    if not email:
+        return
+    with _cache_lock:
+        _cache.pop(email, None)
+
+
 def is_permitted_user(email: str | None) -> bool:
     """檢查這個 email 是不是 users 表裡的啟用中(active)使用者。"""
     info = get_user_auth_info(email)

@@ -112,6 +112,33 @@ def _maybe_touch(cur, conn, token: str) -> None:
     conn.commit()
 
 
+def delete_sessions_for_email(cur, email: str) -> int:
+    """刪掉這個 email 名下所有 session，回傳刪掉幾筆。
+
+    管理員把帳號停用時呼叫（見 admin_utils/users.py 的 update_user）。
+    刻意收 cursor 而不是自己開連線：這樣刪除跟「把 status 改成
+    deactive」那句 UPDATE 在同一個交易裡，不會出現「帳號已停用但
+    session 還在」或反過來的中間狀態，也少開一條連線。
+
+    email 用 LOWER() 比對，跟 whitelist.py 查授權時同一個規則——
+    users 表裡的大小寫不保證跟 Google 回傳的 email claim 一致，
+    直接等號比對會漏刪，而漏刪的後果正是這支函式要防的事。
+    """
+    cur.execute(
+        sql("DELETE FROM sessions WHERE LOWER(email) = LOWER(?) RETURNING token"),
+        (email,),
+    )
+    tokens = [row[0] for row in cur.fetchall()]
+    # 順手把節流字典裡對應的 token 清掉。不清也不會錯（那些 token 之後
+    # 永遠查不到 session，resolve_session 一律回 None），純粹是不要讓
+    # 這個字典累積永遠用不到的鍵。
+    if tokens:
+        with _touch_lock:
+            for t in tokens:
+                _last_touched.pop(t, None)
+    return len(tokens)
+
+
 def delete_session(token: str | None) -> None:
     if not token:
         return

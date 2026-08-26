@@ -97,6 +97,20 @@ STATUS_LABELS = {
 }
 
 
+# 「這個帳號被停用/未獲授權」專用的回應內容。403 這個狀態碼在這支
+# backend 有三個來源（帳號被停用、/auth/login 的未授權、查別人專案的
+# 用量），但只有前者代表「這個人已經不能用這個系統了」，前端要據此把
+# 頁面鎖回未登入狀態；後者只是單一操作沒權限，把人踢出去是錯的。
+#
+# 所以除了人看的 error 訊息之外，另外帶一個機器可讀的 code——前端只在
+# 看到這個 code 時才登出，不是看到 403 就登出。用訊息字串比對會很脆弱
+# （改個錯字就失效），狀態碼本身又不夠細。
+_ACCOUNT_DISABLED_BODY = {
+    "error": "此帳號未獲授權或已被停用，請聯絡管理員",
+    "code": "account_disabled",
+}
+
+
 def require_auth(view_func):
     """
     裝飾器：檢查請求有沒有帶合法的 session token，且對應的 email 在
@@ -116,8 +130,17 @@ def require_auth(view_func):
     def wrapper(*args, **kwargs):
         token = auth.extract_bearer_token(request)
         email = sessions.resolve_session(token)
-        if email is None or not whitelist.is_permitted_user(email):
-            return jsonify({"error": "未登入或此帳號未獲授權"}), 401
+        # 兩種失敗刻意分開回不同的狀態碼，不要合併成一個 401：
+        #   401 = 沒有有效身分（沒帶 token、token 無效或已過期）→ 重新登入有用
+        #   403 = 身分有效，但這個帳號沒有權限（被停用）→ 重新登入沒有用
+        # /auth/login 本來就是這樣分的（未授權回 403），這裡跟它一致。
+        # 合併成 401 不會造成重登迴圈（重登時 /auth/login 會回 403，前端
+        # 就停下來了），但會多繞一次往返，而且前端沒辦法分辨要顯示
+        # 「請重新登入」還是「你的帳號已被停用，請聯絡管理員」。
+        if email is None:
+            return jsonify({"error": "未登入或登入已過期"}), 401
+        if not whitelist.is_permitted_user(email):
+            return jsonify(_ACCOUNT_DISABLED_BODY), 403
         request.user_email = email
         return view_func(*args, **kwargs)
 
@@ -127,16 +150,31 @@ def require_auth(view_func):
 def require_admin(view_func):
     """
     裝飾器：跟 require_auth 一樣先驗證登入/授權，另外還要求這個帳號
-    的角色是管理員，不然一律 401。用在管理員介面（使用者/權限/專案
-    管理）的所有 API 上。
+    的角色是管理員。用在管理員介面（使用者/權限/專案管理）的所有
+    API 上。
+
+    三種失敗分開回應，理由跟 require_auth 一樣（見那裡的說明）：
+      401 沒有有效身分          → 重新登入有用
+      403 + account_disabled   → 帳號被停用，重新登入沒有用，前端該登出
+      403（無 code）           → 身分正常，只是不是管理員；這種情況
+                                 前端不該把人踢出去，他在一般功能上
+                                 完全正常
+    這裡用 get_user_auth_info() 一次拿到 active/is_admin 兩個資訊來
+    分辨後兩者，而不是呼叫 is_admin_user()——後者把「被停用」跟「不是
+    管理員」壓成同一個 False，分不出來。它有快取，所以不是多一次查詢。
     """
 
     @wraps(view_func)
     def wrapper(*args, **kwargs):
         token = auth.extract_bearer_token(request)
         email = sessions.resolve_session(token)
-        if email is None or not whitelist.is_admin_user(email):
-            return jsonify({"error": "未登入或此帳號未獲管理員授權"}), 401
+        if email is None:
+            return jsonify({"error": "未登入或登入已過期"}), 401
+        info = whitelist.get_user_auth_info(email)
+        if info is None or not info["active"]:
+            return jsonify(_ACCOUNT_DISABLED_BODY), 403
+        if not info["is_admin"]:
+            return jsonify({"error": "此帳號未獲管理員授權"}), 403
         request.user_email = email
         return view_func(*args, **kwargs)
 
