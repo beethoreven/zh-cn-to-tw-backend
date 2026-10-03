@@ -84,19 +84,9 @@ REFINE_MAX_RETRY = int(os.environ.get("REFINE_MAX_RETRY", "3"))
 REFINE_MIN_OUTPUT_RATIO = float(os.environ.get("REFINE_MIN_OUTPUT_RATIO", "0.7"))
 REFINE_WARN_OUTPUT_RATIO = float(os.environ.get("REFINE_WARN_OUTPUT_RATIO", "0.9"))
 
-# PDF 轉圖片時的解析度，越高辨識越準但越慢
+# PDF 轉圖片時的解析度。backend 本身不轉圖（OCR 一律在使用者本機做），
+# 這組值只透過 /api/options 提供給前端的 DPI 欄位當預設值與上下限。
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
-
-UPLOAD_DIR = os.environ.get(
-    "UPLOAD_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-)
-
-# 封面頁偵測的門檻，純本機影像統計（PIL），不用任何付費 API。這是啟發式
-# 規則會有誤判，門檻先抓一個合理的初始值，之後看實際誤判狀況再調整
-COVER_DETECT_DEFAULT = os.environ.get("COVER_DETECT_DEFAULT", "true").lower() == "true"
-COVER_DETECT_DARK_RATIO_THRESHOLD = float(os.environ.get("COVER_DETECT_DARK_RATIO_THRESHOLD", "0.35"))
-COVER_DETECT_SATURATION_THRESHOLD = float(os.environ.get("COVER_DETECT_SATURATION_THRESHOLD", "20"))
-COVER_DETECT_RELATIVE_MARGIN = float(os.environ.get("COVER_DETECT_RELATIVE_MARGIN", "1.5"))
 
 # --- 前端可調欄位的上下限，後端也會用同一組邊界做驗證，不能只信任前端 ---
 BATCH_PAGES_MIN = 1

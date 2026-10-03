@@ -30,7 +30,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from db_utils.connection import get_ready_conn, sql
 
@@ -97,6 +97,25 @@ def resolve_session(token: str | None) -> str | None:
 
         _maybe_touch(cur, conn, token)
         return email
+    finally:
+        conn.close()
+
+
+def delete_idle_sessions() -> int:
+    """刪掉超過 SESSION_IDLE_DAYS 天沒用過的 session，回傳刪掉的筆數。
+    resolve_session 只會在同一個 token 再被拿出來用時順便刪掉逾期的那筆，
+    但換電腦、清掉資料、重裝 App 之後，舊 token 永遠不會再出現，只能靠
+    這裡定期清（app.py 啟動時的背景清理迴圈每小時呼叫一次）。
+
+    last_seen_at 一律由 _now_iso() 寫入（UTC、同一種 ISO 格式），所以直接
+    比字串就等同比時間，跟 db_utils/job_store.py 的 delete_expired 同一招。"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SESSION_IDLE_DAYS)).isoformat()
+    conn, cur = get_ready_conn()
+    try:
+        cur.execute(sql("DELETE FROM sessions WHERE last_seen_at < ?"), (cutoff,))
+        count = cur.rowcount
+        conn.commit()
+        return count
     finally:
         conn.close()
 

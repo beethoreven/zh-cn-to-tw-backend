@@ -1,6 +1,7 @@
 """
-提交者：串接（可選）封面偵測 -> OCR -> OpenCC 簡轉繁 -> LLM 潤飾（Gemini 或
-Claude）-> OpenCC 校正 -> 驗證 -> 組裝。
+提交者：串接 OpenCC 簡轉繁 -> LLM 潤飾（Gemini 或 Claude）-> OpenCC 校正
+-> 驗證 -> 組裝。OCR 不在這裡：一律在使用者本機做完（11+ 走
+zh-cn-to-tw-ocr-service，10.15 走 Apple Vision framework），backend 只收文字。
 
 每一步都透過 job_manager 寫 log，前端可以輪詢看到即時進度。
 
@@ -21,7 +22,6 @@ Claude）-> OpenCC 校正 -> 驗證 -> 組裝。
 
 from __future__ import annotations
 
-import itertools
 import time
 
 from configs import config
@@ -59,9 +59,8 @@ def _refine_and_correct(
     已用盡)；絕不拋出例外，任何失敗都退回 traditional_text（純 OpenCC
     結果）。額度用盡的旗標讓呼叫端可以決定要不要乾脆放棄剩下的批次，不用
     每批次都重新撞一次已經確定用盡的額度、白白浪費重試等待時間。"""
-    # 這兩個 client 刻意在函式內 import，不放模組最上面——跟 run_ocr_stage
-    # 延後 import ocr_utils 是同一個手法，但理由不同：那裡是為了不讓
-    # PyInstaller 把用不到的東西打包進去，這裡是為了縮短 Render 的冷啟動。
+    # 這兩個 client 刻意在函式內 import，不放模組最上面，為了縮短 Render
+    # 的冷啟動。
     #
     # 實測（本機）：import app 共 2131ms，其中 anthropic 佔 995ms、
     # google.genai 佔 429ms，兩者合計約 67%。而 Render 免費方案只有
@@ -217,92 +216,8 @@ def _refine_and_correct(
         return traditional_text, False
 
 
-def run_ocr_stage(job_id: str, pdf_path: str, dpi: int, detect_cover: bool) -> tuple[list[str], int]:
-    """封面偵測（可選）+ 逐頁 OCR，回傳 (每頁文字, 實際頁數)。桌面版 App
-    會在使用者本機端做這一段（見 zh-cn-to-tw-ocr-service），伺服器端的
-    正常上傳流程則由 run_pipeline 呼叫這裡，兩條路徑共用同一份邏輯。
-
-    ocr_utils 這幾個 import 刻意放在函式裡面、不放模組最上面：它們會把
-    PaddleOCR/PaddlePaddle/PyMuPDF 整包拉進來（光 paddle 就約 600MB）。
-    桌面版 App 把這支 backend 一起打包進 .app 時，OCR 是由旁邊獨立的
-    zh-cn-to-tw-ocr-service 負責、這個函式永遠不會被呼叫到，模組層級的
-    import 會讓 PyInstaller 把這些完全用不到的東西也打包進去，白白多出
-    數百 MB。放在函式內就只有真的走伺服器端上傳流程時才會載入。"""
-    from ocr_utils.cover_detect import evaluate_cover_page
-    from ocr_utils.ocr_engine import ocr_page
-    from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
-
-    job_manager.append_log(job_id, "開始將 PDF 轉成頁面圖片")
-    # total_pages 用便宜的方式單獨查（不渲染任何一頁），page_images
-    # 則是逐頁 yield 的產生器——不要把整份 PDF 的每一頁圖片同時留在
-    # 記憶體裡，頁數多、DPI 高的劇本很容易讓記憶體用量衝到超過
-    # Render 免費方案的上限，把整個 process OOM 砍掉（連帶讓所有還
-    # 在進行中的請求，包括前端輪詢，一起失敗，且因為 job 狀態只存
-    # 在記憶體裡，process 重啟後那個 job 就徹底消失，前端看到的會是
-    # 「找不到這個 job」）。
-    total_pages = get_pdf_page_count(pdf_path)
-    page_images = render_pdf_pages(pdf_path, dpi=dpi)
-    job_manager.append_log(job_id, f"PDF 共 {total_pages} 頁，開始逐頁轉圖並辨識")
-
-    if not detect_cover:
-        job_manager.append_log(job_id, "「偵測首頁是否為封面」已關閉，略過封面偵測")
-    elif total_pages < 2:
-        job_manager.append_log(job_id, f"PDF 只有 {total_pages} 頁，略過封面偵測")
-    else:
-        # 封面偵測需要先看過第 1、2 頁，只好先把這兩頁從產生器拉出來；
-        # 不管判定結果如何、甚至中途出錯，lookahead 裡拉到的頁面最後
-        # 都會用 itertools.chain 接回產生器最前面，不會漏掉任何一頁
-        lookahead = []
-        try:
-            lookahead.append(next(page_images))
-            lookahead.append(next(page_images))
-            result = evaluate_cover_page(
-                lookahead[0],
-                lookahead[1],
-                config.COVER_DETECT_DARK_RATIO_THRESHOLD,
-                config.COVER_DETECT_SATURATION_THRESHOLD,
-                config.COVER_DETECT_RELATIVE_MARGIN,
-            )
-            job_manager.append_log(
-                job_id,
-                f"封面偵測：首頁墨水覆蓋率={result.dark_ratio:.2f}、飽和度={result.saturation:.1f}"
-                f"（門檻分別為 {config.COVER_DETECT_DARK_RATIO_THRESHOLD}、"
-                f"{config.COVER_DETECT_SATURATION_THRESHOLD}）；"
-                f"參考頁（第 2 頁）墨水覆蓋率={result.reference_dark_ratio:.2f}、"
-                f"飽和度={result.reference_saturation:.1f}"
-                f"（相對倍數門檻 {config.COVER_DETECT_RELATIVE_MARGIN}）"
-                f" → 判定{'為封面' if result.is_cover else '不是封面'}",
-            )
-            if result.is_cover:
-                lookahead = lookahead[1:]
-                total_pages -= 1
-                job_manager.append_log(
-                    job_id,
-                    "首頁已自動移除，不列入 OCR 與後續處理範圍；"
-                    "如果判斷錯誤，請關閉「偵測首頁是否為封面」開關重新處理",
-                )
-        except Exception as exc:  # noqa: BLE001
-            # 封面偵測本身只是加分項，出錯就當作沒偵測到，繼續正常處理
-            # 全部頁面，不能因為這個非必要的判斷讓整個 job 失敗
-            job_manager.append_log(
-                job_id, f"封面偵測發生錯誤：{exc}，跳過偵測，正常處理全部頁面", level="warning"
-            )
-        page_images = itertools.chain(lookahead, page_images)
-
-    raw_pages = []
-    for idx, image in enumerate(page_images, start=1):
-        job_manager.append_log(job_id, f"OCR 辨識第 {idx}/{total_pages} 頁")
-        text = ocr_page(image)
-        raw_pages.append(text)
-
-    job_manager.append_log(job_id, "全部頁面 OCR 完成，開始分批處理")
-    return raw_pages, total_pages
-
-
 def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settings: dict | None = None):
-    """OpenCC 簡轉繁 -> LLM 潤飾 -> OpenCC 校正 -> 驗證 -> 組裝，不含 OCR。
-    桌面版 App 呼叫的新路徑（本機已經 OCR 完）跟一般上傳路徑（run_pipeline）
-    都會走到這裡，確保兩條路徑的潤飾/校對規則完全一致，不會分岔維護。"""
+    """OpenCC 簡轉繁 -> LLM 潤飾 -> OpenCC 校正 -> 驗證 -> 組裝，不含 OCR。"""
     settings = settings or {}
     model = settings.get("model") or config.GEMINI_MODEL
     batch_pages_setting = settings.get("batch_pages", config.REFINE_BATCH_PAGES)
@@ -417,24 +332,8 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     job_manager.set_result(job_id, result_text)
 
 
-def run_pipeline(job_id: str, pdf_path: str, settings: dict | None = None):
-    """一般網頁上傳路徑：OCR + 潤飾兩段都在這裡（通常是伺服器端）做完。"""
-    settings = settings or {}
-    dpi = settings.get("dpi", config.PDF_RENDER_DPI)
-    detect_cover = settings.get("detect_cover", config.COVER_DETECT_DEFAULT)
-
-    job_manager.set_status(job_id, "running")
-    try:
-        raw_pages, total_pages = run_ocr_stage(job_id, pdf_path, dpi, detect_cover)
-        run_refine_stage(job_id, raw_pages, total_pages, settings)
-    except Exception as exc:  # noqa: BLE001
-        job_manager.append_log(job_id, f"發生錯誤：{exc}", level="error")
-        job_manager.set_error(job_id, str(exc))
-
-
 def run_refine_only_pipeline(job_id: str, raw_pages: list[str], total_pages: int, settings: dict | None = None):
-    """桌面版 App 路徑：OCR 已經在使用者本機的 zh-cn-to-tw-ocr-service 做完，
-    這裡只跑潤飾那一半，跟 run_pipeline 共用同一層錯誤保底邏輯。"""
+    """OCR 已經在使用者本機做完，這裡只跑潤飾那一半，外面包一層錯誤保底。"""
     job_manager.set_status(job_id, "running")
     try:
         run_refine_stage(job_id, raw_pages, total_pages, settings)

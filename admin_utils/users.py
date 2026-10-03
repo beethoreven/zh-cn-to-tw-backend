@@ -54,7 +54,7 @@ def list_active_user_names() -> list[dict]:
     """給專案管理的「負責人」下拉選單用：只列出 status=active 的使用者。"""
     conn, cur = get_ready_conn()
     try:
-        cur.execute(sql("SELECT id, name FROM users WHERE status = ? ORDER BY name"), ("active",))
+        cur.execute(sql("SELECT id, name FROM users WHERE status = ? ORDER BY id"), ("active",))
         return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
     finally:
         conn.close()

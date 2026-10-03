@@ -19,7 +19,7 @@ from configs import config
 from db_utils import app_versions, job_store
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
-from pipeline.orchestrator import run_pipeline, run_refine_only_pipeline
+from pipeline.orchestrator import run_refine_only_pipeline
 from review import review_manager
 from review.reviewer import run_review
 from usage.fx_rate import get_usd_twd_rate
@@ -60,8 +60,6 @@ CORS(
     expose_headers=["Content-Disposition"],
 )
 
-os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-
 
 def _startup_recover_jobs() -> None:
     """process 啟動時，把資料庫裡還停在 pending/running 的工作標成
@@ -79,6 +77,15 @@ def _startup_recover_jobs() -> None:
             removed = job_store.delete_expired()
             if removed:
                 print(f"[cleanup] 已清除 {removed} 筆超過保留期的工作紀錄", flush=True)
+            # 包起來是因為這整條迴圈是同一個背景執行緒：session 清理只要
+            # 拋一次例外（例如剛好遇到 Neon 冷啟動逾時），執行緒就結束了，
+            # 連帶上面的工作紀錄清理也永遠不會再跑。
+            try:
+                idle = sessions.delete_idle_sessions()
+                if idle:
+                    print(f"[cleanup] 已清除 {idle} 筆超過 {sessions.SESSION_IDLE_DAYS} 天沒用過的 session", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] session 清理失敗，下一輪再試：{exc}", flush=True)
             time.sleep(3600)
 
     threading.Thread(target=run, daemon=True).start()
@@ -536,68 +543,13 @@ def _validate_project_and_model(project_id: int, model: str) -> None:
             raise ValueError("個人專案使用量達上限")
 
 
-@app.post("/api/jobs")
-@require_auth
-def create_job():
-    if "file" not in request.files:
-        return jsonify({"error": "缺少檔案，請用 file 欄位上傳 PDF"}), 400
-
-    file = request.files["file"]
-    if not file.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "只接受 PDF 檔案"}), 400
-
-    try:
-        settings = {
-            "model": _parse_model(request.form.get("model")),
-            "batch_pages": _parse_batch_pages(request.form.get("batch_pages")),
-            "max_retry": _parse_bounded_int(
-                request.form.get("max_retry"),
-                config.REFINE_MAX_RETRY,
-                config.MAX_RETRY_MIN,
-                config.MAX_RETRY_MAX,
-                "max_retry",
-            ),
-            "dpi": _parse_bounded_int(
-                request.form.get("dpi"),
-                config.PDF_RENDER_DPI,
-                config.DPI_MIN,
-                config.DPI_MAX,
-                "dpi",
-            ),
-            "file_name": file.filename,
-            "detect_cover": _parse_bool(request.form.get("detect_cover"), config.COVER_DETECT_DEFAULT),
-            "user_email": request.user_email,
-            "project": _require_project_id(request.form.get("project")),
-            **_parse_refine_switches(request.form),
-        }
-        # 兩個開關都關的話完全不會呼叫任何 model，project/model 的額度與
-        # 白名單規則（_validate_project_and_model）自然也不適用——不驗證，
-        # 避免表單上鎖住、實際沒在用的 model 欄位殘留舊選擇（例如切換到
-        # 個人專案前選過 Claude）反而擋下這次「根本不會呼叫 model」的請求。
-        if settings["enable_preprocess"] or settings["enable_llm_refine"]:
-            _validate_project_and_model(settings["project"], settings["model"])
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-
-    job_id = job_manager.create_job(original_filename=file.filename, user_email=request.user_email)
-    pdf_path = os.path.join(config.UPLOAD_DIR, f"{job_id}.pdf")
-    file.save(pdf_path)
-
-    thread = threading.Thread(
-        target=run_pipeline, args=(job_id, pdf_path, settings), daemon=True
-    )
-    thread.start()
-
-    return jsonify({"job_id": job_id}), 202
-
-
 @app.post("/api/jobs/from-ocr-text")
 @require_auth
 def create_job_from_ocr_text():
-    """桌面版 App 專用路徑：PDF 已經在使用者本機的 zh-cn-to-tw-ocr-service
-    做完封面偵測 + PaddleOCR，這裡只接手做 OpenCC 簡轉繁 + LLM 潤飾那一半
-    （run_refine_only_pipeline），跟一般網頁上傳路徑共用同一套潤飾/校對
-    邏輯與 project/model 規則檢查，只是不重跑 OCR。"""
+    """Stage 1 唯一的入口：PDF 已經在使用者本機做完 OCR（11+ 走
+    zh-cn-to-tw-ocr-service，10.15 走 Apple Vision framework），這裡只接手
+    OpenCC 簡轉繁 + LLM 潤飾。backend 不碰 PDF、不跑 OCR——原本伺服器端
+    OCR 的 POST /api/jobs 已經拔掉，見 README「為什麼 OCR 搬到使用者本機」。"""
     data = request.get_json(silent=True) or {}
     pages = data.get("pages")
     if not isinstance(pages, list) or not pages or not all(isinstance(p, str) for p in pages):

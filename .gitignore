@@ -2,8 +2,9 @@ venv/
 __pycache__/
 *.pyc
 .env
-uploads/*
-!uploads/.gitkeep
+# 舊版伺服器端 OCR 的上傳暫存目錄（已移除）。本機可能還留有當時上傳的劇本 PDF，
+# 保留這條規則避免它們被誤 commit。
+uploads/
 .DS_Store
 *.log
 build/
