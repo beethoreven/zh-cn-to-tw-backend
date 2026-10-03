@@ -522,8 +522,9 @@ def _validate_project_and_model(project_id: int, model: str) -> None:
     """檢查這次呼叫的 project/model 組合合不合規則，不合規就拋
     ValueError（呼叫端都已經在 try/except ValueError 裡，會被接住轉成
     400）。目前只有「個人專案」（config.PERSONAL_PROJECT_ID，所有人
-    共用的那個特殊專案）有這些額外限制：不能用 Claude model，Gemini
-    3.6 Flash 每天有獨立的低額度——這個專案沒有負責人可以追蹤是誰在
+    共用的那個特殊專案）有這些額外限制：不能用 Claude model，每個 Gemini
+    Flash 模型（config.PERSONAL_PROJECT_LIMITED_MODELS）每天各有獨立的低
+    額度——這個專案沒有負責人可以追蹤是誰在
     用，這些限制是為了不讓它變成白嫖 Claude/洗爆 Gemini 額度的後門。
     前端在選到這個專案時也會把 Claude 選項從選單拿掉，這裡是後端這層
     真正擋掉未授權存取的地方（前端只是視覺提示）。刻意用固定 id 判斷
@@ -537,7 +538,7 @@ def _validate_project_and_model(project_id: int, model: str) -> None:
 
     if model.startswith("claude"):
         raise ValueError("個人專案不能使用 Claude Model")
-    if model == "gemini-3.6-flash":
+    if model in config.PERSONAL_PROJECT_LIMITED_MODELS:
         used_today = get_today_project_model_count(project_id, model)
         if used_today >= config.PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT:
             raise ValueError("個人專案使用量達上限")

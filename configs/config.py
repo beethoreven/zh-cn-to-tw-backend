@@ -102,6 +102,8 @@ WHOLE_BOOK_SENTINEL = "whole"
 # 各 model 每日呼叫次數上限，介面顯示「已用/上限」用；可用環境變數覆蓋
 RPD_LIMITS = {
     "gemini-3.6-flash": int(os.environ.get("GEMINI_3_6_FLASH_RPD_LIMIT", "20")),
+    "gemini-3.7-flash": int(os.environ.get("GEMINI_3_7_FLASH_RPD_LIMIT", "20")),
+    "gemini-3.8-flash": int(os.environ.get("GEMINI_3_8_FLASH_RPD_LIMIT", "20")),
     "gemini-3.5-flash-lite": int(os.environ.get("GEMINI_3_5_FLASH_LITE_RPD_LIMIT", "500")),
 }
 
@@ -115,13 +117,15 @@ RPD_LIMITS = {
 # 依賴的前提。
 PERSONAL_PROJECT_ID = 1
 
-# 個人專案底下 Gemini 3.6 Flash 每天可以打幾次，比一般專案嚴格很多——
-# 這個專案沒有負責人可以追蹤是誰在用，用這個低額度避免被拿來當白嫖/
-# 洗爆額度的後門。特意不做成 DB 可調設定，就是不希望它跟一般的權限
-# 額度混在一起管理。
+# 個人專案底下，每個 Gemini Flash 模型每天各可以打幾次，比一般專案嚴格
+# 很多——這個專案沒有負責人可以追蹤是誰在用，Flash 系列每個模型的免費
+# 額度又只有每天 20 次，用這個低額度避免被拿來當白嫖/洗爆額度的後門。
+# 每個模型分開算（各自有獨立的 Google 額度），不是三個加總。特意不做成
+# DB 可調設定，就是不希望它跟一般的權限額度混在一起管理。
 PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT = int(
     os.environ.get("PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT", "6")
 )
+PERSONAL_PROJECT_LIMITED_MODELS = frozenset({"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"})
 
 # Gemini model 清單，附上要顯示在介面上的說明文字；也是 /api/usage
 # 每日呼叫次數（RPD）統計會遍歷的對象，只有 Gemini 有這種每日額度限制，
@@ -131,11 +135,19 @@ AVAILABLE_MODELS = {
         "label": "Gemini 3.6 Flash",
         "description": "品質較佳、語意判斷較細緻，適合需要精準校對的場合；但每日額度較少。",
     },
+    "gemini-3.7-flash": {
+        "label": "Gemini 3.7 Flash",
+        "description": "跟 3.6 Flash 同系列的新版，每日額度跟 3.6 Flash 分開計算；3.6 Flash 額度用完或忙碌時可以改用。",
+    },
+    "gemini-3.8-flash": {
+        "label": "Gemini 3.8 Flash",
+        "description": "Flash 系列目前最新的版本，每日額度跟其他 Flash 分開計算；3.6／3.7 Flash 額度用完或忙碌時可以改用。",
+    },
     "gemini-3.5-flash-lite": {
         "label": "Gemini 3.5 Flash Lite",
         "description": (
             "速度快、額度較高，適合大量／整本處理；但語意判斷較粗略，"
-            "細節校對可能不如 3.6 Flash 精準。"
+            "細節校對可能不如 Flash 系列精準。"
         ),
     },
 }
@@ -169,7 +181,7 @@ REVIEW_MAX_RETRY = int(os.environ.get("REVIEW_MAX_RETRY", "3"))
 
 DEFAULT_REVIEW_MODEL = os.environ.get("DEFAULT_REVIEW_MODEL", "gemini-3.6-flash")
 
-# Stage 1、Stage 2 共用的完整 model 清單（Gemini 2 個 + Claude 1 個）。
+# Stage 1、Stage 2 共用的完整 model 清單（Gemini 4 個 + Claude 1 個）。
 # 各自呼叫互不影響；Claude 這個選項會實際計費（沒有 Gemini 那種持續性
 # 免費額度），說明文字裡有明講，避免使用者不小心選到。
 #
@@ -182,8 +194,7 @@ DEFAULT_REVIEW_MODEL = os.environ.get("DEFAULT_REVIEW_MODEL", "gemini-3.6-flash"
 # Claude token 狀況」不會再顯示 Opus 這一項（過去的用量還在 usage_log
 # 裡，只是不再查詢/顯示，見 CLAUDE_PRICING 上面的說明）。
 ALL_MODELS = {
-    "gemini-3.6-flash": AVAILABLE_MODELS["gemini-3.6-flash"],
-    "gemini-3.5-flash-lite": AVAILABLE_MODELS["gemini-3.5-flash-lite"],
+    **AVAILABLE_MODELS,
     "claude-haiku-4-5-20251001": {
         "label": "Claude Haiku 4.5",
         "description": (
