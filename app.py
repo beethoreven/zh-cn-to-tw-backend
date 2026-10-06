@@ -385,15 +385,16 @@ def _claude_usage_response(usage_by_model_fn) -> dict:
 @require_auth
 def get_project_usage(project_id):
     """回傳這個劇本案累積至今的 Claude token 用量與估計台幣費用，
-    給主介面「本案使用 Claude token 狀況」用。只有這個專案的負責人或
+    給主介面「本案使用 Claude token 狀況」用。只有這個專案的負責人（三個
+    負責人欄位任何一格）或
     管理員能查——不然任何登入者都能靠猜連續整數 ID（1, 2, 3...）看到
     別人專案的用量／費用資料，等於跨客戶資料外洩。
 
     例外：PERSONAL_PROJECT_ID 是所有人共用的個人專案，沒有負責人可
     比對，任何登入者都能查（見 config.PERSONAL_PROJECT_ID 的說明，
-    這裡刻意用固定 id 判斷，不是 owner IS NULL）。實測撞過：漏掉這個
-    特例時 `project["owner"] != user_id` 對任何使用者都是 True（None
-    不等於任何整數），個人專案的用量查詢對所有非管理員一律 403，前端
+    這裡刻意用固定 id 判斷，不是看負責人欄位是不是 NULL）。實測撞過：
+    漏掉這個特例時負責人比對對任何使用者都不成立（None 不等於任何
+    整數），個人專案的用量查詢對所有非管理員一律 403，前端
     res.ok 又沒檢查，後續 renderClaudeUsageRows 對 undefined 的
     data.models 直接炸例外，用量面板整個壞掉。"""
     project = admin_projects.get_project(project_id)
@@ -403,7 +404,7 @@ def get_project_usage(project_id):
     is_personal_project = project_id == config.PERSONAL_PROJECT_ID
     if (
         not is_personal_project
-        and project["owner"] != user_id
+        and not admin_projects.is_project_owner(project, user_id)
         and not whitelist.is_admin_user(request.user_email)
     ):
         return jsonify({"error": "沒有權限查看這個專案的用量"}), 403
@@ -510,7 +511,7 @@ def _validate_project_and_model(project_id: int, model: str) -> None:
     用，這些限制是為了不讓它變成白嫖 Claude/洗爆 Gemini 額度的後門。
     前端在選到這個專案時也會把 Claude 選項從選單拿掉，這裡是後端這層
     真正擋掉未授權存取的地方（前端只是視覺提示）。刻意用固定 id 判斷
-    是不是個人專案，不是 owner IS NULL——見 config.PERSONAL_PROJECT_ID
+    是不是個人專案，不是看負責人欄位是不是 NULL——見 config.PERSONAL_PROJECT_ID
     的說明。"""
     project = admin_projects.get_project(project_id)
     if project is None:
@@ -977,17 +978,37 @@ def _require_role_id(raw_value) -> int:
     return role_id
 
 
-def _require_owner_id(raw_value) -> int:
+def _require_owner_id(raw_value, label: str = "負責人") -> int:
     """驗證負責人 ID 指向一個真的存在的使用者，不要只驗證「是不是數字」
     就直接寫進 DB——不然一個不存在的 owner id 會一路送到資料庫，才因為
     外鍵違反而噴錯，而且噴出來的是沒被接住的 500，不是清楚的錯誤訊息。"""
+    # bool 是 int 的子類別，int(True) 會變成 1——不擋的話 JSON 的 true
+    # 會被當成 id=1 的使用者
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{label}必須是數字")
     try:
         owner_id = int(raw_value)
     except (TypeError, ValueError):
-        raise ValueError("負責人必須是數字")
+        raise ValueError(f"{label}必須是數字")
     if admin_users.get_user(owner_id) is None:
         raise ValueError(f"找不到 id={owner_id} 的使用者")
     return owner_id
+
+
+def _parse_project_owners(body: dict) -> tuple[int, int | None, int | None]:
+    """專案的三個負責人欄位。負責人1 必填（跟原本單一負責人時一樣，
+    專案一定要有人負責）；負責人2/3 是拆單時才會用到，沒填（None 或
+    空字串）就是空著。三格重複填同一個人不報錯——那只是操作失誤，
+    不影響「誰能用這個專案」的判斷。"""
+    owner_1 = _require_owner_id(body.get("owner_1"), "負責人1")
+    extra_owners = []
+    for key, label in (("owner_2", "負責人2"), ("owner_3", "負責人3")):
+        raw_value = body.get(key)
+        if raw_value is None or raw_value == "":
+            extra_owners.append(None)
+        else:
+            extra_owners.append(_require_owner_id(raw_value, label))
+    return (owner_1, extra_owners[0], extra_owners[1])
 
 
 @app.get("/admin/users")
@@ -1125,13 +1146,13 @@ def admin_create_project():
         name = str(body.get("name") or "").strip()
         if not name:
             raise ValueError("名稱不能空白")
-        owner = _require_owner_id(body.get("owner"))
+        owners = _parse_project_owners(body)
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
 
     try:
-        project = admin_projects.create_project(name, owner, status)
+        project = admin_projects.create_project(name, owners, status)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"建立失敗：{exc}"}), 400
     return jsonify(project), 201
@@ -1154,13 +1175,13 @@ def admin_update_project(project_id):
         name = str(body.get("name") or "").strip()
         if not name:
             raise ValueError("名稱不能空白")
-        owner = _require_owner_id(body.get("owner"))
+        owners = _parse_project_owners(body)
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
 
     try:
-        changed = admin_projects.update_project(project_id, name, owner, status)
+        changed = admin_projects.update_project(project_id, name, owners, status)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "project": admin_projects.get_project(project_id)})

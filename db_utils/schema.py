@@ -3,7 +3,7 @@
 
 建立順序有相依性，不能隨便調換：
 1. permissions（角色 → 額度對照表）——users.role 會參照這裡的 id
-2. users（帳號）——projects.owner 會參照這裡的 id
+2. users（帳號）——projects.owner_1/2/3 會參照這裡的 id
 3. projects
 4. usage_log（用量記錄表）
 5. sessions（應用程式自己簽發的登入 session）
@@ -121,16 +121,31 @@ def _ensure_users(cur) -> None:
 
 
 def _ensure_projects(cur) -> None:
+    # 一個專案最多三個負責人（拆單時會同時指派給不只一個人）。三格
+    # 地位相同，任何一格填到的使用者都能使用這個專案；刻意不加「三格
+    # 不能重複」的限制——重複填同一個人只是操作失誤，不影響任何判斷，
+    # 不值得為此報錯。
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS projects (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
-            owner INTEGER REFERENCES users(id),
+            owner_1 INTEGER REFERENCES users(id),
+            owner_2 INTEGER REFERENCES users(id),
+            owner_3 INTEGER REFERENCES users(id),
             status TEXT NOT NULL DEFAULT 'pending'
         )
         """
     )
+    # 既有資料庫的遷移（2026-10-06）：原本只有單一 owner 欄位，改名成
+    # owner_1（資料原封不動留著），再補上 owner_2/owner_3。
+    existing_columns = _existing_columns(cur, "projects")
+    if "owner" in existing_columns and "owner_1" not in existing_columns:
+        cur.execute("ALTER TABLE projects RENAME COLUMN owner TO owner_1")
+    for column in ("owner_2", "owner_3"):
+        cur.execute(
+            f"ALTER TABLE projects ADD COLUMN IF NOT EXISTS {column} INTEGER REFERENCES users(id)"
+        )
 
 
 def _ensure_usage_log(cur) -> None:
