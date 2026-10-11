@@ -29,7 +29,7 @@ load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 # --- Google 登入 ---
 
@@ -179,7 +179,7 @@ REVIEW_BATCH_CHARS_MAX = 20000
 
 REVIEW_MAX_RETRY = int(os.environ.get("REVIEW_MAX_RETRY", "3"))
 
-DEFAULT_REVIEW_MODEL = os.environ.get("DEFAULT_REVIEW_MODEL", "gemini-3.6-flash")
+DEFAULT_REVIEW_MODEL = os.environ.get("DEFAULT_REVIEW_MODEL", "gemini-3.5-flash-lite")
 
 # Stage 1、Stage 2 共用的完整 model 清單（Gemini 4 個 + Claude 1 個）。
 # 各自呼叫互不影響；Claude 這個選項會實際計費（沒有 Gemini 那種持續性
