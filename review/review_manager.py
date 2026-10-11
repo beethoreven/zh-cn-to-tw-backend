@@ -81,6 +81,28 @@ def get_review(review_id: str) -> dict | None:
     return job_store.load(review_id)
 
 
+def _rehydrate(review_id: str) -> None:
+    """記憶體裡沒有這個 review 時，從 DB 撈回來放進記憶體。
+
+    給「校對做完之後才發生的寫入」用（套用勾選、記錄被拒絕的建議）。
+    這類寫入跟校對本身可能隔很久——使用者要先把幾百筆建議看完、勾完——
+    中間 process 只要重啟過一次，_reviews 就是空的。get_review() 會回頭
+    查 DB 所以讀得到，但原本的寫入函式只看記憶體、找不到就直接 return，
+    於是 /apply 照樣回 200、前端照樣跳「已套用 N 筆修改」，applied_text
+    卻從頭到尾沒存進任何地方，下載拿到的是完全沒改過的原文。實測撞過：
+    勾了一百多筆、套用成功，下載的檔案一個字都沒改。
+
+    DB 查詢刻意放在 _lock 外面，不要握著鎖等網路。"""
+    with _lock:
+        if review_id in _reviews:
+            return
+    loaded = job_store.load(review_id)
+    if loaded is None:
+        return
+    with _lock:
+        _reviews.setdefault(review_id, loaded)
+
+
 def append_log(review_id: str, message: str, level: str = "info"):
     with _lock:
         review = _reviews.get(review_id)
@@ -165,6 +187,7 @@ def set_applied_text(review_id: str, text: str):
     `review["applied_text"] or review["source_text"]` 這時候就會退回
     校對前的原文去重新校對，已經套用修好的問題會被重新校對重新抓出來
     一次，使用者看到的是「明明修過的東西又跑回來了」。"""
+    _rehydrate(review_id)
     with _lock:
         review = _reviews.get(review_id)
         if review is None:
@@ -177,6 +200,7 @@ def record_rejected_findings(review_id: str, selected_ids: set[int]) -> None:
     """套用時記錄下使用者沒勾選的建議，供之後重新校對時排除用。跟
     set_applied_text 同一個理由要 _persist：process 重啟後這份名單一樣
     會不見，重新校對就會把使用者已經明確拒絕過的建議再拿出來煩他一次。"""
+    _rehydrate(review_id)
     with _lock:
         review = _reviews.get(review_id)
         if review is None:
