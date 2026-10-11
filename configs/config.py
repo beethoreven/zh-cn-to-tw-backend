@@ -105,6 +105,7 @@ RPD_LIMITS = {
     "gemini-3.7-flash": int(os.environ.get("GEMINI_3_7_FLASH_RPD_LIMIT", "20")),
     "gemini-3.8-flash": int(os.environ.get("GEMINI_3_8_FLASH_RPD_LIMIT", "20")),
     "gemini-3.5-flash-lite": int(os.environ.get("GEMINI_3_5_FLASH_LITE_RPD_LIMIT", "500")),
+    "gemini-3.1-flash-lite": int(os.environ.get("GEMINI_3_1_FLASH_LITE_RPD_LIMIT", "500")),
 }
 
 # 「個人專案」：所有登入者共用的特殊專案，沒有負責人可以追蹤是誰在用。
@@ -148,6 +149,13 @@ AVAILABLE_MODELS = {
         "description": (
             "速度快、額度較高，適合大量／整本處理；但語意判斷較粗略，"
             "細節校對可能不如 Flash 系列精準。"
+        ),
+    },
+    "gemini-3.1-flash-lite": {
+        "label": "Gemini 3.1 Flash Lite",
+        "description": (
+            "比 3.5 Flash Lite 舊一代的 Lite 版本，每日額度跟 3.5 Flash Lite 分開計算；"
+            "3.5 Flash Lite 額度用完時可以改用。"
         ),
     },
 }
