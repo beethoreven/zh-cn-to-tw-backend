@@ -111,6 +111,18 @@ def set_result(job_id: str, text: str):
     _persist(job_id)
 
 
+def set_fields(job_id: str, **fields):
+    """給 Stage 2「套用範本修改」用：在套用結果的 job 上多存報告、分析
+    報告要用的命中清單等欄位。payload 是整份 JSON 存進 Neon，多出來的
+    欄位會跟著持久化，不需要改資料表。"""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.update(fields)
+    _persist(job_id)
+
+
 def set_error(job_id: str, error: str):
     with _lock:
         job = _jobs.get(job_id)

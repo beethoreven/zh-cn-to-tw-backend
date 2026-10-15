@@ -18,7 +18,8 @@ import anthropic
 from configs import config
 from llm_utils.errors import OutputTruncatedError, TransientAPIError
 from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_prompt
-from review.prompts import PREPROCESS_REVIEW_PROMPT, REVIEW_PROMPT
+from pattern.prompts import PATTERN_ANALYSIS_PROMPT
+from review.prompts import select_review_prompt
 from usage.usage_log import record_usage
 
 _client = None
@@ -98,10 +99,25 @@ def review_text(
     file_name: str | None = None,
     project: int | None = None,
     enable_preprocess: bool = False,
+    skip_fullwidth_punct: bool = False,
 ) -> str:
-    """Stage 2 校對：回傳 Claude 原始輸出，由呼叫端解析。
+    """Stage 3 校對：回傳 Claude 原始輸出，由呼叫端解析。
 
     enable_preprocess=False 時輸出是 JSON 陣列（校對建議）；True 時輸出是
-    JSON 物件（前置處理後的文字 + 校對建議），見 review/prompts.py。"""
-    prompt = (PREPROCESS_REVIEW_PROMPT if enable_preprocess else REVIEW_PROMPT).format(text=text)
+    JSON 物件（前置處理後的文字 + 校對建議），見 review/prompts.py。
+    skip_fullwidth_punct 是 2.0 前端帶的「前置處理不轉全形」。"""
+    prompt = select_review_prompt(enable_preprocess, skip_fullwidth_punct).format(text=text)
+    return _generate(prompt, model, user_email, file_name=file_name, project=project)
+
+
+def analyze_pattern(
+    items_text: str,
+    model: str | None = None,
+    user_email: str | None = None,
+    file_name: str | None = None,
+    project: int | None = None,
+) -> str:
+    """Stage 2 分析報告：回傳 Claude 原始輸出（JSON 陣列），由
+    pattern/analyzer.py 解析。"""
+    prompt = PATTERN_ANALYSIS_PROMPT.format(items=items_text)
     return _generate(prompt, model, user_email, file_name=file_name, project=project)

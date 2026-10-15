@@ -15,22 +15,24 @@
 
 ### 這是什麼
 
-主持人／劇本負責人拿到的劇本殺劇本經常是簡體中文 PDF，需要先轉成台灣慣用的繁體中文才能給玩家使用。這個工具把「OCR 辨識 → 簡轉繁 → LLM 潤飾 → 人工校對」這條原本要手工做的流程自動化，分成兩個階段:
+主持人／劇本負責人拿到的劇本殺劇本經常是簡體中文 PDF，需要先轉成台灣慣用的繁體中文才能給玩家使用。這個工具把「OCR 辨識 → 簡轉繁 → LLM 潤飾 → 人工校對」這條原本要手工做的流程自動化，2.0 起分成三個階段（1.x 只有 Stage 1 跟「Stage 2 校對」兩個，1.x 的 Stage 2 就是現在的 Stage 3）:
 
 - **Stage 1（簡轉繁）**:上傳 PDF，自動 OCR + 簡轉繁 + LLM 潤飾（斷句、標點、修正 OCR 誤植錯字），輸出可下載的 .txt/.docx。
-- **Stage 2（校對）**:對 Stage 1 的輸出（或直接上傳已經是繁體的檔案）再跑一輪 LLM 校對，抓用詞/錯字/標點問題，結構化清單讓使用者逐筆勾選要不要套用。
+- **Stage 2（通用修改／套用範本修改，2.0 新增）**:對 Stage 1 的輸出（或直接上傳的檔案）用程式套用一份「修改前 → 修改後」的替換範本，同時刪除半形空格、把半形標點轉成全形，產出逐筆列出前後文的修改報告。可選擇請 LLM 看過字詞類的修改、提醒可能改錯的地方（只提醒、不改字）。
+- **Stage 3（校對）**:對前面的輸出（或直接上傳已經是繁體的檔案）再跑一輪 LLM 校對，抓用詞/錯字/標點問題，結構化清單讓使用者逐筆勾選要不要套用。
 
 人工校對依然是必須的，但這個工具省下大部分前置作業的人力。
 
 ### 系統架構
 
-整個專案分成四個獨立 repo，透過一個 git meta-repo（`zh-cn-to-tw`）用 submodule 掛在一起（見頂層 README 的說明）:
+整個專案分成五個獨立 repo，透過一個 git meta-repo（`zh-cn-to-tw`）用 submodule 掛在一起（見頂層 README 的說明）:
 
 ```
 zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本身不部署
 ├── zh-cn-to-tw-backend/         ← 本 repo，部署到 Render(Flask)
-├── zh-cn-to-tw-web/             ← 前端，main 分支被桌面版 App 內嵌；GitHub Pages 服務的是另一個獨立的 update-page 分支（純佔位頁）
+├── zh-cn-to-tw-web/             ← 前端，main 分支被桌面版 App 內嵌；GitHub Pages 服務的是另一個獨立的 update-page 分支（下載頁）
 ├── zh-cn-to-tw-mac/             ← macOS 桌面殼（Swift/SwiftUI + WKWebView）
+├── zh-cn-to-tw-windows/         ← Windows 桌面殼（.NET 8 WPF + WebView2）
 └── zh-cn-to-tw-ocr-service/     ← 只在使用者本機跑的 OCR 服務，被桌面殼當子行程拉起
 ```
 
@@ -51,6 +53,8 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 嘗試過的緩解方式（都只是延後問題，沒有根治）:限制 PaddleOCR 只用單一 CPU 執行緒、改成逐頁串流處理避免一次性記憶體尖峰、調降 DPI。**真正的解法是把 OCR 整個搬離 Render**——桌面版把這一段丟到使用者自己的機器上執行（`zh-cn-to-tw-ocr-service`），backend 只保留 DB、LLM API 金鑰、登入、管理員介面、job/review 狀態這些「一定要連外」的部分。
 
 **曾經考慮過、後來放棄的方案**:讓桌面版把整支 backend 也一起打包進 .app（`packaging/backend_service.spec`，已刪除），本機自己跑一份完整的 backend。放棄原因是本機 backend 用 HTTP 供應網頁時，監聽的 port 是每次啟動隨機配的（刻意避免舊 process 卡住固定 port），而 `localStorage` 是照 `scheme+host+port` 算 origin 的——port 每次不一樣，等於使用者每次開 App 登入的 session 都救不回來，變成每次啟動都要重新登入。最後改成桌面殼直接用固定的 `file://` 路徑內嵌網頁（不透過任何本機 HTTP 伺服器），origin 因此穩定；憑證（DB 連線字串、LLM API 金鑰）完全不進桌面版 App，一律留在 Render——這是刻意的安全取捨:客戶端的機密本質上無法真正保護（程式執行時必須能解密才能用，加密只是提高門檻），所以憑證乾脆不下發，桌面版只拿一個範圍有限、可撤銷的 session token。
+
+2.0 起 `file://` 也換掉了，改成同樣固定、但有正常來源的網址：Windows 是 WebView2 的虛擬主機 `https://zh-cn-to-tw.example`，Mac 預計改成自訂 scheme `zhcntotw://app`。原因是 `file://` 的 Origin 是 `"null"`，ES module 會被 CORS 擋下，前端沒辦法拆成多個模組。這兩個來源都已加進這支 backend 的 CORS 允許清單（`app.py`），`"null"` 暫時保留給還在用 1.x 的桌面版。
 
 ### 拔掉伺服器端 OCR、升級到 Python 3.12（2026-10-03）
 
@@ -90,6 +94,24 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 因為距離已經不是瓶頸，兩項原本被排定的最佳化都**刻意不做**:psycopg3 連線池（同區後只能再省約 130ms，卻要引進「Neon 閒置 5 分鐘 suspend 會砍掉池內連線」這個新失效模式），以及把每個已登入請求的 5 條連線減成 2 條（150ms → 60ms，對使用者無感）。完整推論見 `db_utils/connection.py` 的歷史教訓四。
 
+### Stage 2「套用範本修改」：替換用程式做，LLM 只看報告（2.0）
+
+這個功能是從實際的人工流程長出來的：把一份「修改前 → 修改後」清單套到將近兩百頁的劇本 docx 上，逐份核對之後確認，這類「幾乎一定可以直接換」的修改交給程式做，召回率跟正確性都比交給 LLM 穩，而且每次結果都一樣。所以**套用跟產生報告都是純程式**（`pattern/engine.py`、`pattern/report.py`），不呼叫任何 LLM。LLM 只用在選配的「分析報告」，而且只看「字詞類規則改到的地方＋前後文」，不看全文。標點轉換的命中刻意不送給 LLM（數量大、幾乎不會錯），也刻意不做跨檔對照——目的是把 AI 的介入程度壓在「提醒」，最後一律由人來看。
+
+**處理順序與底線**：每一行各自處理，順序固定：刪除半形空格（夾在兩個英文字母／數字中間的保留，避免英文字黏在一起）→ 半形標點轉全形（`, ! ? : ; ( )` 這七個；逗號、冒號夾在兩個數字中間的不轉，例如 1,000、12:30）→ 套用範本規則。底線是「除了這三種修改，一個字都不能少」，換行跟空行也算在內。`run()` 最後會用另一種寫法對整份文字獨立重算一次、再比對行數，對不上就直接回 500——寧可整個失敗，也不回傳可能少了字的結果。
+
+**規則怎麼套**：所有規則編成一個 regex，單趟掃過。長的規則優先（「依依不舍」要先於「不舍」被比對到），改完的結果不會再被另一條規則改一次。「修改後」包含「修改前」的規則（例如 `石翁 → 石翁仲`）會自動加上前後排除條件：原文已經是「石翁仲」的地方不會變成「石翁仲仲」，同一份文字重跑也不會越改越長。
+
+**範本格式與檢查**：一行一條「修改前 → 修改後」，`#` 開頭是註解。會擋下、不採用的錯誤：箭頭不是剛好一個、某一邊是空的、規則裡有空白、同一個「修改前」對應到不同的「修改後」、超過 5000 條或 50 萬字。照用但會提醒的警告：完全重複、修改前後一樣、純標點的規則（標點已經由固定步驟處理）。前端選檔當下就用同一套規則（`zh-cn-to-tw-web` 的 `js/stages/pattern-template.js`，訊息逐字相同）先檢查，格式有問題當場報錯；後端套用時會再檢查一次，後端這份才是權威。
+
+**預設範本與個人範本**：預設範本是這個 repo 的 `pattern.txt`，每次請求都重讀檔案（同 `ta-notice.txt` 的做法），改完 push、Render 部署完就生效，不需要重新打包桌面版。個人範本只存在前端記憶體：使用者下載目前的範本、自己增減、再選回來，套用時跟著請求送出，後端用完就丟——不會存起來，也不會蓋掉預設範本；關掉 App、重新整理或登出就清掉。
+
+**結果與報告**：套用結果存成一個新的 job（`result_text` 是套用後的文字），所以下載、接續 Stage 3 校對都直接沿用既有的 `/api/jobs/<id>/download` 與 `/api/jobs/<id>/review`。報告跟命中清單存在同一個 job 的 payload 裡（`pattern_report`、`pattern_word_hits`、`pattern_summary`），`jobs` 表的 payload 本來就是整份 JSON，所以不需要改資料表。下載的檔名分別加上 `_已套用範本` 與 `_修改報告`，避免蓋掉原檔；報告是帶 BOM 的 UTF-8 txt，舊版記事本打開也不會亂碼。
+
+**分析報告**：刻意做成一筆獨立的 `kind="pattern_analysis"` 紀錄、有自己的 status，而不是掛在套用結果上的一個欄位——這樣伺服器重啟時，`mark_running_as_interrupted` 會把還在跑的分析標成 interrupted，前端就知道要提示使用者重新分析，不會永遠停在「分析中」（known-issue-check 第 14 條）。每 40 筆送一次 LLM，每批做完就先存一次部分結果；LLM 回傳不存在的編號會被丟掉。沒有字詞類的修改就不會呼叫 LLM，也就不檢查個人專案的 model 限制。
+
+**Stage 3 校對的配套修改**：半形轉全形原本是校對「前置處理」叫 LLM 做的，2.0 改成在 Stage 2 用程式做掉，LLM 少一件事。但 prompt 不能直接改：1.x 的桌面版沒有 Stage 2，後端一改，還沒升級的人校對時就沒人轉全形了。所以 `review/prompts.py` 保留兩個版本，只有 2.0 前端帶 `skip_fullwidth_punct=true` 時才用不轉全形的那個；沒帶參數的請求拿到的 prompt 跟改版前逐字相同（有測試直接比對過）。使用者跳過 Stage 2 直接校對時，標點就不會被轉成全形——這是刻意的，跳過 Stage 2 通常就是不想轉。
+
 ### 檔案結構
 
 ```
@@ -101,7 +123,9 @@ db_utils/                資料庫層
   ├── job_store.py         job/review 狀態持久化到 Neon
   └── app_versions.py      桌面版 App 強制更新門檻查詢
 auth_utils/               Google 登入驗證、session、白名單
-jobs/ review/             Stage 1/Stage 2 各自的工作管理
+jobs/ review/             Stage 1／Stage 3（校對）各自的工作管理
+pattern/                  Stage 2 套用範本修改：範本解析、套用引擎、修改報告、分析報告
+pattern.txt               Stage 2 的預設範本（每次請求重讀）
 pipeline/orchestrator.py  Stage 1 的簡轉繁→潤飾 流程編排（不含 OCR，OCR 一律在使用者本機做）
 llm_utils/                Gemini/Claude 呼叫封裝
 usage/                    用量統計（Gemini 次數、Claude token/費用）
@@ -114,7 +138,8 @@ validators/               輸出驗證（例如殘留簡體字檢查）
 ### 已知限制
 
 - `usage.db`（現在是 Neon 裡的 `usage_log` 表）記的是「本工具打了幾次」，不是 Google/Anthropic 官方帳務系統的即時數字，兩邊會有落差。
-- Stage 2 的「套用」是逐批次做局部字串替換，同一批次內同樣的錯字重複出現兩次以上，目前只會替換第一次出現的位置。
+- Stage 3（校對）的「套用」是逐批次做局部字串替換，同一批次內同樣的錯字重複出現兩次以上，目前只會替換第一次出現的位置。
+- Stage 2 的範本規則一律在單一行內比對，不會跨行；也不分辨詞的邊界，太短的規則容易跨詞誤中（例如「這只」會改到「這只是…」）。這正是分析報告要提醒的東西，維護 `pattern.txt` 時也要留意。
 - 本機跑的 backend 跟 Render 連的是同一個 Neon 資料庫，而任何一邊啟動時都會把 DB 裡 `pending`/`running` 的工作標成 `interrupted`（`db_utils/job_store.py` 假設只有單一實例）。本機啟動前要先確認沒有人在跑工作，見架設 SOP「Part A 5. 啟動」。
 
 ---
@@ -211,6 +236,18 @@ curl https://<你的部署網址>/api/jobs/active
 回傳 `{"active": 0}` 才適合部署（重啟會讓正在跑的 job 直接消失，雖然
 會被標記成 `interrupted`、使用者可以選擇重試，但體驗上還是有中斷）。
 
+### 修改 Stage 2 的預設範本（pattern.txt）
+
+1. 編輯這個 repo 根目錄的 `pattern.txt`：一行一條，寫成 `修改前 → 修改後`（中間的箭頭是全形的「→」，前後各一個半形空格），`#` 開頭的行是註解。半形空格跟半形標點不用寫成規則，Stage 2 會自動處理。
+2. 在這個 repo 的資料夾裡檢查格式（用 Part A 建好的虛擬環境）：
+
+   ```bash
+   python -X utf8 -c "from pattern.template import parse_template; p = parse_template(open('pattern.txt', encoding='utf-8').read()); print(len(p.rules), 'rules'); [print('錯誤', n, m) for n, m in p.errors]; [print('警告', n, m) for n, m in p.warnings]"
+   ```
+
+   只印出規則數就代表沒問題；有「錯誤」的話線上套用會直接回 400，一定要先修掉。「警告」不會擋，但最好看一下。
+3. commit、push。Render 部署完成後就生效，不需要重新打包桌面版（每次套用都會重讀這個檔案）。
+
 ## Part C. 環境變數總覽
 
 沒有預設值、要自己設定的只有下面四個。Render 上目前也只設了這四個:
@@ -227,14 +264,14 @@ curl https://<你的部署網址>/api/jobs/active
 | 變數 | 預設 | 說明 |
 |---|---|---|
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Stage 1 的 Model 選單預設值 |
-| `DEFAULT_REVIEW_MODEL` | `gemini-3.5-flash-lite` | Stage 2 的 Model 選單預設值 |
+| `DEFAULT_REVIEW_MODEL` | `gemini-3.5-flash-lite` | Stage 3（校對）與 Stage 2 分析報告的 Model 選單預設值 |
 | `REFINE_BATCH_PAGES` | `20` | Stage 1 每批幾頁;`whole` 代表整本只當一批 |
 | `REFINE_MAX_RETRY` | `3` | Stage 1 單批失敗最多重試幾次 |
 | `REFINE_MIN_OUTPUT_RATIO` | `0.7` | Stage 1 輸出字數比低於這個值就丟棄這批結果 |
 | `REFINE_WARN_OUTPUT_RATIO` | `0.9` | Stage 1 輸出字數比低於這個值只記警告、保留結果 |
 | `PDF_RENDER_DPI` | `200` | 前端 DPI 欄位的預設值 |
-| `REVIEW_BATCH_CHARS` | `1000` | Stage 2 每批幾個字 |
-| `REVIEW_MAX_RETRY` | `3` | Stage 2 單批失敗最多重試幾次 |
+| `REVIEW_BATCH_CHARS` | `1000` | Stage 3（校對）每批幾個字 |
+| `REVIEW_MAX_RETRY` | `3` | Stage 3（校對）單批失敗最多重試幾次；Stage 2 分析報告也用這個預設 |
 | `CLAUDE_MAX_OUTPUT_TOKENS` | `8192` | Claude 單次輸出上限 |
 | `CLAUDE_HAIKU_PRICE_INPUT` | `1.0` | Claude Haiku 輸入單價，計算花費用 |
 | `CLAUDE_HAIKU_PRICE_OUTPUT` | `5.0` | Claude Haiku 輸出單價，計算花費用 |
@@ -262,7 +299,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 ### 版本檢查
 
-- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — 桌面殼在開始 Stage 1/2 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 11 以上一包、10.15 改用 Vision framework 做 OCR 另一包各自一包），省略時預設 `11+`
+- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — 前端在開始每個 Stage 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 11 以上一包、10.15 改用 Vision framework 做 OCR 另一包各自一包），省略時預設 `11+`
 
 ### 桌面版強制更新門檻
 
@@ -275,10 +312,18 @@ curl https://<你的部署網址>/api/jobs/active
 - `GET /api/jobs/<id>/download?format=txt|docx` — 下載結果
 - `POST /api/jobs/<id>/finalize` — 工作被中斷時，保留部分成果結案
 
-### Stage 2
+### Stage 2（套用範本修改，2.0 新增）
 
-- `POST /api/jobs/<job_id>/review` — 對已完成的 Stage 1 job 開始校對
-- `POST /api/jobs/direct-upload` — 直接上傳已是繁體的 .docx/.txt，跳過 Stage 1
+- `GET /api/pattern-template` — 預設範本全文與規則數（下載範本、改成個人範本的起點）
+- `POST /api/jobs/<job_id>/pattern` — 對一個已有結果的 job（Stage 1 的結果或直接上傳的檔案）套用範本。JSON body 可帶 `template`（個人範本全文），沒帶就用 `pattern.txt`。範本格式有問題回 400，`details` 逐行列出問題；成功回新的 `job_id`、統計摘要 `summary` 與範本警告 `warnings`
+- `GET /api/jobs/<id>/pattern-report` — 下載修改報告（txt）
+- `POST /api/jobs/<id>/pattern-analysis` — 開始分析報告（背景執行，回 202 與 `analysis_id`）。JSON body：`model`、`project`、`max_retry`（選填）
+- `GET /api/pattern-analyses/<id>` — 查詢分析進度與結果
+
+### Stage 3（校對，1.x 的 Stage 2）
+
+- `POST /api/jobs/<job_id>/review` — 對已完成的 job（Stage 1、Stage 2 的結果，或直接上傳的檔案）開始校對。2.0 前端會帶 `skip_fullwidth_punct=true`（前置處理不轉全形），沒帶就維持 1.x 的行為
+- `POST /api/jobs/direct-upload` — 直接上傳 .docx/.txt，從 Stage 2 或 Stage 3 開始
 - `GET /api/reviews/<id>` — 查詢進度與 findings
 - `POST /api/reviews/<id>/apply` — 套用勾選的建議
 - `POST /api/reviews/<id>/rerun` — 重新校對一輪
@@ -303,22 +348,24 @@ This is the backend API for a tool that converts Simplified-Chinese murder-myste
 
 ### What This Is
 
-Game-master / scripts owner often get MMG script in Simplified-Chinese PDFs and need converting to the Traditional Chinese used in Taiwan before players can use them. This tool automates "OCR → Simplified-to-Traditional conversion → LLM polish → human proofreading" into two stages:
+Game-master / scripts owner often get MMG script in Simplified-Chinese PDFs and need converting to the Traditional Chinese used in Taiwan before players can use them. This tool automates "OCR → Simplified-to-Traditional conversion → LLM polish → human proofreading". Since 2.0 it has three stages (1.x had only Stage 1 and "Stage 2 Proofread"; 1.x's Stage 2 is today's Stage 3):
 
 - **Stage 1 (Convert)**: upload a PDF → OCR + conversion + LLM polish (sentence breaks, punctuation, fixing obvious OCR misreads) → downloadable .txt/.docx.
-- **Stage 2 (Proofread)**: run another LLM pass over Stage 1's output (or a directly-uploaded already-Traditional file) to catch wording/typo/punctuation issues, presented as a structured checklist the user selectively applies.
+- **Stage 2 (General Edits / Apply Template, new in 2.0)**: apply a "before → after" replacement template to Stage 1's output (or a directly-uploaded file) in plain code, while also deleting half-width spaces and converting half-width punctuation to full-width, and produce an edit report that lists every change with its surrounding text. Optionally, an LLM can look over the word-level edits and flag ones that may be wrong (it only flags; it never changes text).
+- **Stage 3 (Proofread)**: run another LLM pass over the earlier output (or a directly-uploaded already-Traditional file) to catch wording/typo/punctuation issues, presented as a structured checklist the user selectively applies.
 
 Human review is still required, but this tool removes most of the manual prep work.
 
 ### System Architecture
 
-The project spans four independent repos, wired together via a git meta-repo (`zh-cn-to-tw`) using submodules (see the top-level README):
+The project spans five independent repos, wired together via a git meta-repo (`zh-cn-to-tw`) using submodules (see the top-level README):
 
 ```
 zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never deployed itself
 ├── zh-cn-to-tw-backend/         ← this repo, deployed to Render (Flask)
-├── zh-cn-to-tw-web/             ← frontend; its main branch is embedded in the desktop app; GitHub Pages serves a separate update-page branch (a pure placeholder)
+├── zh-cn-to-tw-web/             ← frontend; its main branch is embedded in the desktop app; GitHub Pages serves a separate update-page branch (the download page)
 ├── zh-cn-to-tw-mac/             ← macOS desktop shell (Swift/SwiftUI + WKWebView)
+├── zh-cn-to-tw-windows/         ← Windows desktop shell (.NET 8 WPF + WebView2)
 └── zh-cn-to-tw-ocr-service/     ← local-only OCR service, launched as a subprocess by the desktop shell
 ```
 
@@ -339,6 +386,8 @@ This was the biggest turn the project took, and it took several failed attempts 
 Mitigations tried (all just delayed the problem, none fixed it): pinning PaddleOCR to a single CPU thread, streaming pages one at a time instead of a single memory spike, lowering DPI. The **real fix was moving OCR off Render entirely** — the desktop version offloads it to the user's own machine (`zh-cn-to-tw-ocr-service`), leaving the backend with only what genuinely must stay remote: the database, LLM API keys, login, the admin interface, and job/review state.
 
 **A considered-then-abandoned alternative**: bundling the entire backend into the desktop `.app` too (`packaging/backend_service.spec`, since deleted), running a full local copy. This was abandoned because a locally-run backend serving the web UI over HTTP binds to a randomly-assigned port on each launch (deliberately, to avoid a stale process squatting a fixed port) — and `localStorage` keys origin by `scheme+host+port`. A different port every launch means every launch is effectively a new origin, so the login session stored in `localStorage` could never survive a restart — the user had to log in again every single time. The fix was to have the desktop shell load the web UI from a fixed `file://` path instead (no local HTTP server involved at all), giving it a stable origin. Credentials (the DB connection string, LLM API keys) never ship inside the desktop app at all — they stay on Render exclusively. This was a deliberate security tradeoff: client-side secrets can't actually be protected (the code must be able to decrypt them to use them, so encryption only raises the bar, it doesn't close the door) — so the desktop app is simply never handed anything worth stealing; it only gets a scoped, revocable session token.
+
+From 2.0 on, `file://` is replaced too, by an address that is just as fixed but has a proper origin: on Windows a WebView2 virtual host, `https://zh-cn-to-tw.example`; on Mac a custom scheme, `zhcntotw://app` (planned). The reason is that a `file://` page's Origin is `"null"`, so ES modules get blocked by CORS and the frontend could not be split into multiple modules. Both origins are already in this backend's CORS allowlist (`app.py`); `"null"` stays there for now for desktop apps still on 1.x.
 
 ### Removing Server-Side OCR and Moving to Python 3.12 (2026-10-03)
 
@@ -378,6 +427,24 @@ Roughly **59×**. The new database independently reproduced the same ratio (`con
 
 Because distance is no longer the bottleneck, two previously-scoped optimizations were **deliberately not done**: a psycopg3 connection pool (worth only ~130 ms more per request once co-located, while introducing a new failure mode — Neon suspends after 5 minutes idle and severs pooled connections), and cutting the 5 connections opened per authenticated request down to 2 (150 ms → 60 ms, imperceptible to users). The full reasoning lives in `db_utils/connection.py`'s fourth historical lesson.
 
+### Stage 2 "Apply Template": Replacements in Code, the LLM Only Reads the Report (2.0)
+
+This feature grew out of a real manual workflow: applying a "before → after" list to screenplay docx files close to two hundred pages long and checking every result showed that for this kind of near-certain replacement, plain code gives steadier recall and accuracy than an LLM, and the same result every time. So **applying the template and producing the report are pure code** (`pattern/engine.py`, `pattern/report.py`) and call no LLM. The LLM is used only for the optional "analysis report", and it only sees the places word-level rules changed plus their surrounding text, never the full text. Punctuation hits are deliberately not sent to the LLM (there are many of them and they are almost never wrong), and there is deliberately no cross-file comparison — the point is to keep the AI's involvement at "flagging"; a human always reviews in the end.
+
+**Processing order and the hard rule**: each line is processed on its own, in a fixed order: delete half-width spaces (a space between two ASCII letters/digits is kept, so English words don't get glued together) → convert half-width punctuation to full-width (the seven characters `, ! ? : ; ( )`; a comma or colon between two digits is left alone, e.g. 1,000 or 12:30) → apply the template rules. The hard rule is "apart from these three kinds of edits, not a single character may go missing", line breaks and blank lines included. At the end, `run()` recomputes the whole text independently, in a deliberately different way, and compares line counts; on any mismatch it returns a 500 — failing outright is better than returning a result that might have lost characters.
+
+**How rules are applied**: all rules are compiled into one regex and applied in a single pass. Longer rules win ("依依不舍" must be matched before "不舍"), and text produced by one rule is never rewritten by another. A rule whose "after" contains its "before" (e.g. `石翁 → 石翁仲`) automatically gets lookbehind/lookahead guards: text that already reads "石翁仲" does not become "石翁仲仲", and re-running on the same text never keeps growing it.
+
+**Template format and validation**: one "before → after" rule per line; lines starting with `#` are comments. Errors that block the template: not exactly one arrow, an empty side, whitespace inside a rule, the same "before" mapped to different "after"s, more than 5000 rules or 500,000 characters. Warnings that are allowed but flagged: exact duplicates, before equal to after, punctuation-only rules (punctuation is already handled by the fixed step). The frontend checks a chosen file immediately with the same rules (`js/stages/pattern-template.js` in `zh-cn-to-tw-web`, with word-for-word identical messages) and reports format problems on the spot; the backend checks again when applying, and the backend's check is the authoritative one.
+
+**Default template and personal templates**: the default template is this repo's `pattern.txt`, re-read on every request (the same approach as `ta-notice.txt`), so an edit takes effect once it is pushed and Render has deployed — no desktop rebuild needed. A personal template lives only in frontend memory: the user downloads the current template, edits it, and picks it back in; it is sent along with the apply request and discarded by the backend afterwards — never stored, and never overwriting the default. Closing the app, reloading, or signing out clears it.
+
+**Result and report**: the applied result is saved as a new job (`result_text` is the edited text), so downloading and continuing to Stage 3 proofreading reuse the existing `/api/jobs/<id>/download` and `/api/jobs/<id>/review`. The report and the hit list live in that same job's payload (`pattern_report`, `pattern_word_hits`, `pattern_summary`); the `jobs` table's payload is a whole JSON document already, so no schema change was needed. Downloaded filenames get `_已套用範本` and `_修改報告` appended so they never overwrite the original file; the report is UTF-8 txt with a BOM so even old versions of Notepad don't garble it.
+
+**Analysis report**: deliberately its own `kind="pattern_analysis"` record with its own status, rather than a field on the applied result — so when the server restarts, `mark_running_as_interrupted` marks a still-running analysis as interrupted and the frontend knows to offer a re-run instead of showing "analyzing" forever (known-issue-check item 14). Items go to the LLM 40 at a time, and partial results are saved after every batch; item numbers the LLM invents are dropped. When there are no word-level edits the LLM is never called, so the personal-project model restriction isn't checked either.
+
+**The matching change in Stage 3 proofreading**: converting half-width punctuation used to be part of proofreading's LLM "preprocessing"; 2.0 moves it into Stage 2 as plain code, so the LLM has one job fewer. But the prompt could not simply be edited: 1.x desktop apps have no Stage 2, so changing it on the backend would leave anyone who hasn't upgraded with no full-width conversion at all. `review/prompts.py` therefore keeps both versions and uses the no-conversion one only when the 2.0 frontend sends `skip_fullwidth_punct=true`; a request without the parameter gets a prompt identical, character for character, to the one before the change (a test compares them directly). When a user skips Stage 2 and goes straight to proofreading, punctuation is not converted to full-width — deliberately, since skipping Stage 2 usually means they don't want it converted.
+
 ### File Layout
 
 ```
@@ -389,7 +456,9 @@ db_utils/                database layer
   ├── job_store.py         job/review state persisted to Neon
   └── app_versions.py      forced-update threshold lookups for the desktop app
 auth_utils/               Google sign-in verification, sessions, whitelist
-jobs/ review/             Stage 1/Stage 2 job management
+jobs/ review/             Stage 1 / Stage 3 (proofreading) job management
+pattern/                  Stage 2 Apply Template: template parsing, the apply engine, the edit report, the analysis report
+pattern.txt               Stage 2's default template (re-read on every request)
 pipeline/orchestrator.py  Stage 1's conversion→polish orchestration (no OCR; OCR always runs on the user's machine)
 llm_utils/                Gemini/Claude call wrappers
 usage/                    usage tracking (Gemini call counts, Claude tokens/cost)
@@ -402,7 +471,8 @@ validators/               output validation (e.g. leftover-Simplified-character 
 ### Known Limitations
 
 - `usage_log` (the Neon table) counts "how many times this tool called the API," not a live read of Google's/Anthropic's own billing systems — the two will diverge.
-- Stage 2's "apply" does batch-scoped local string replacement; if the same typo appears more than once within one batch, only the first occurrence gets replaced.
+- Stage 3 (proofreading)'s "apply" does batch-scoped local string replacement; if the same typo appears more than once within one batch, only the first occurrence gets replaced.
+- Stage 2's template rules always match within a single line, never across lines, and they don't know about word boundaries: a short rule can easily hit across words (e.g. "這只" also rewrites "這只是…"). This is exactly what the analysis report is meant to flag, and something to keep in mind when maintaining `pattern.txt`.
 - A locally-run backend connects to the same Neon database as Render, and either one marks every `pending`/`running` job in the DB as `interrupted` on startup (`db_utils/job_store.py` assumes a single instance). Before starting one locally, confirm nobody has a job running — see Setup Guide "Part A 5. Start It".
 
 ---
@@ -502,6 +572,18 @@ Only deploy when this returns `{"active": 0}` — a restart makes any
 in-flight job disappear (it gets marked `interrupted` and the user can
 choose to retry, but it's still a real interruption).
 
+### Editing Stage 2's Default Template (pattern.txt)
+
+1. Edit `pattern.txt` at this repo's root: one rule per line, written as `before → after` (the arrow is the full-width "→" with one half-width space on each side); lines starting with `#` are comments. Half-width spaces and half-width punctuation don't need rules — Stage 2 handles them automatically.
+2. In this repo's folder, check the format (using the virtual environment from Part A):
+
+   ```bash
+   python -X utf8 -c "from pattern.template import parse_template; p = parse_template(open('pattern.txt', encoding='utf-8').read()); print(len(p.rules), 'rules'); [print('錯誤', n, m) for n, m in p.errors]; [print('警告', n, m) for n, m in p.warnings]"
+   ```
+
+   If it prints only the rule count, the template is fine. Any "錯誤" (error) line means applying it online would fail with a 400, so fix it first; "警告" (warning) lines don't block anything but are worth a look.
+3. Commit and push. It takes effect once Render has deployed, with no desktop rebuild needed (every apply re-reads this file).
+
 ## Part C. Environment Variables Overview
 
 Only the four below have no default and must be set by hand. These four are also the only ones currently set on Render:
@@ -518,14 +600,14 @@ Every other variable has a default (in `configs/config.py`, a few in their own m
 | Variable | Default | Description |
 |---|---|---|
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Default of the Stage 1 Model dropdown |
-| `DEFAULT_REVIEW_MODEL` | `gemini-3.5-flash-lite` | Default of the Stage 2 Model dropdown |
+| `DEFAULT_REVIEW_MODEL` | `gemini-3.5-flash-lite` | Default of the Model dropdowns for Stage 3 (proofreading) and Stage 2's analysis report |
 | `REFINE_BATCH_PAGES` | `20` | Pages per Stage 1 batch; `whole` means the entire book as one batch |
 | `REFINE_MAX_RETRY` | `3` | Max retries for a failed Stage 1 batch |
 | `REFINE_MIN_OUTPUT_RATIO` | `0.7` | A Stage 1 batch whose output/input length ratio is below this is discarded |
 | `REFINE_WARN_OUTPUT_RATIO` | `0.9` | Below this ratio a Stage 1 batch is kept but logs a warning |
 | `PDF_RENDER_DPI` | `200` | Default of the frontend's DPI field |
-| `REVIEW_BATCH_CHARS` | `1000` | Characters per Stage 2 batch |
-| `REVIEW_MAX_RETRY` | `3` | Max retries for a failed Stage 2 batch |
+| `REVIEW_BATCH_CHARS` | `1000` | Characters per Stage 3 (proofreading) batch |
+| `REVIEW_MAX_RETRY` | `3` | Max retries for a failed Stage 3 (proofreading) batch; also the default for Stage 2's analysis report |
 | `CLAUDE_MAX_OUTPUT_TOKENS` | `8192` | Claude's per-call output cap |
 | `CLAUDE_HAIKU_PRICE_INPUT` | `1.0` | Claude Haiku input price, used for cost calculation |
 | `CLAUDE_HAIKU_PRICE_OUTPUT` | `5.0` | Claude Haiku output price, used for cost calculation |
@@ -554,7 +636,7 @@ requires the admin role.
 
 ### Version Check
 
-- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — the desktop shell calls this once before starting Stage 1 and once before Stage 2, to find out whether it must force an update. `os_version` isn't "the user's OS version" — it's a build-tier selector: which desktop build this shell actually is, since the same `os` may end up with several independently-versioned desktop builds shipping side by side (e.g. one for macOS 11+, one for 10.15 that does Stage 1 OCR natively via Vision framework). Omitting it defaults to `11+`
+- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — the frontend calls this once before starting each Stage, to find out whether it must force an update. `os_version` isn't "the user's OS version" — it's a build-tier selector: which desktop build this shell actually is, since the same `os` may end up with several independently-versioned desktop builds shipping side by side (e.g. one for macOS 11+, one for 10.15 that does Stage 1 OCR natively via Vision framework). Omitting it defaults to `11+`
 
 ### Desktop Forced-Update Thresholds
 
@@ -567,10 +649,18 @@ The `app_versions` table's unique key is `(os, os_version)`, not `os` alone — 
 - `GET /api/jobs/<id>/download?format=txt|docx` — download the result
 - `POST /api/jobs/<id>/finalize` — close out an interrupted job, keeping partial results
 
-### Stage 2
+### Stage 2 (Apply Template, new in 2.0)
 
-- `POST /api/jobs/<job_id>/review` — start proofreading a finished Stage 1 job
-- `POST /api/jobs/direct-upload` — upload an already-Traditional .docx/.txt, skipping Stage 1
+- `GET /api/pattern-template` — the default template's full text and rule count (the starting point for downloading it and turning it into a personal template)
+- `POST /api/jobs/<job_id>/pattern` — apply the template to a job that already has a result (Stage 1's result or a directly-uploaded file). The JSON body may carry `template` (a personal template's full text); without it, `pattern.txt` is used. A malformed template returns 400 with `details` listing the problem on each line; on success it returns the new `job_id`, a `summary` of counts, and the template's `warnings`
+- `GET /api/jobs/<id>/pattern-report` — download the edit report (txt)
+- `POST /api/jobs/<id>/pattern-analysis` — start the analysis report (runs in the background; returns 202 with `analysis_id`). JSON body: `model`, `project`, `max_retry` (optional)
+- `GET /api/pattern-analyses/<id>` — check the analysis's progress and results
+
+### Stage 3 (Proofreading, 1.x's Stage 2)
+
+- `POST /api/jobs/<job_id>/review` — start proofreading a finished job (Stage 1's or Stage 2's result, or a directly-uploaded file). The 2.0 frontend sends `skip_fullwidth_punct=true` (preprocessing doesn't convert to full-width); without it, the 1.x behavior is kept
+- `POST /api/jobs/direct-upload` — upload a .docx/.txt and start from Stage 2 or Stage 3
 - `GET /api/reviews/<id>` — check progress and findings
 - `POST /api/reviews/<id>/apply` — apply the selected suggestions
 - `POST /api/reviews/<id>/rerun` — run another proofreading pass

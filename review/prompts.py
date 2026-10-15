@@ -1,4 +1,4 @@
-"""Stage 2 校對用的共用 prompt，Gemini/Claude 都用同一套。
+"""Stage 3 校對用的共用 prompt，Gemini/Claude 都用同一套。
 
 兩個版本共用同一套校對判斷標準，差別只在「進行前置處理」有沒有開：
 
@@ -6,6 +6,16 @@
 - ``PREPROCESS_REVIEW_PROMPT``：同一次呼叫裡先把文字套用「合併斷句」與
   「標點全形化／引號整理」，再對套用後的結果挑校對建議，回傳
   ``{"processed_text": ..., "findings": [...]}`` 物件。
+- ``PREPROCESS_REVIEW_PROMPT_KEEP_PUNCT``：同上，但不做「標點全形化」，
+  只整理引號。
+
+前置處理那兩個版本的差別是 2.0 帶來的：半形轉全形改由 Stage 2「套用範本
+修改」用程式硬性做掉（見 pattern/engine.py），LLM 少一件事；使用者跳過
+Stage 2 直接校對時就不會轉全形——這是刻意的（跳過 Stage 2 通常就是不想
+轉），不另外補做。舊的版本不能拿掉：1.x 的桌面版沒有 Stage 2，後端直接
+改 prompt 的話，還沒升級的使用者校對時就沒人轉全形了。所以只有 2.0 前端
+明確帶 skip_fullwidth_punct=true 才用新版本（見 app.py 的
+_parse_review_settings），沒帶的一律維持 1.x 的行為。
 
 前置處理那兩項刻意「直接生效、不進使用者勾選清單」——它們是格式性的
 機械整理，不涉及語意判斷，逐條問使用者只是徒增噪音；真正需要人來判斷的
@@ -63,17 +73,28 @@ REVIEW_PROMPT = (
 """
 )
 
-PREPROCESS_REVIEW_PROMPT = (
-    """你是專業的繁體中文編輯。以下是一份已經完成「簡轉繁」的劇本殺劇本文字，\
+# 前置處理 B 項（標點）的內容。兩個前置處理版本只差在要不要多一句全形化，
+# 見檔頭說明
+_QUOTE_RULE = (
+    "引號一律改為「」；檢查引號是否成對且方向正確"
+    "（開頭用「、結尾用」），缺漏的一邊依語意合理位置補上，方向用反的"
+    "（例如該用「卻誤植成」，或反之）修正成正確方向"
+)
+_FULLWIDTH_RULE = "所有標點符號改為繁體中文全形，"
+
+
+def _build_preprocess_prompt(punct_rule: str) -> str:
+    return (
+        """你是專業的繁體中文編輯。以下是一份已經完成「簡轉繁」的劇本殺劇本文字，\
 簡轉繁本身已經處理過，不需要你管。
 
 請依序完成兩件事。
 
 【第一件事：整理格式】把這份文字整理過一次，只做以下兩種調整：
 A. 合理地合併/斷句換行，讓段落閱讀通順（原本因為排版造成的不合理換行要合併）
-B. 所有標點符號改為繁體中文全形，引號一律改為「」；檢查引號是否成對且方向正確\
-（開頭用「、結尾用」），缺漏的一邊依語意合理位置補上，方向用反的\
-（例如該用「卻誤植成」，或反之）修正成正確方向
+B. """
+        + punct_rule
+        + """
 
 除了 A、B 兩項之外，不要更動任何文字內容——不要改字、不要改用詞、不要增刪內容。
 整理後的文字必須是「完整的一整份」，從第一個字到最後一個字都要在，\
@@ -81,15 +102,15 @@ B. 所有標點符號改為繁體中文全形，引號一律改為「」；檢�
 
 【第二件事：校對】針對【第一件事】整理後的文字，找出「中文語意或用詞」層面的問題，專注在：
 """
-    + _REVIEW_ITEMS
-    + """
+        + _REVIEW_ITEMS
+        + """
 
 請以 JSON 物件格式輸出，包含以下兩個欄位：
 - "processed_text": 【第一件事】整理後的完整文字（字串）
 - "findings": 陣列，每個元素是一個物件，包含以下欄位：
 """
-    + _FINDING_FIELDS_INDENTED
-    + """
+        + _FINDING_FIELDS_INDENTED
+        + """
 
 特別注意：findings 裡的 "original" 與 "context" 一律引用【第一件事】整理後的文字，\
 不要引用整理前的原文，否則會對不上。
@@ -102,4 +123,16 @@ B. 所有標點符號改為繁體中文全形，引號一律改為「」；檢�
 {text}
 ---
 """
-)
+    )
+
+
+PREPROCESS_REVIEW_PROMPT = _build_preprocess_prompt(_FULLWIDTH_RULE + _QUOTE_RULE)
+PREPROCESS_REVIEW_PROMPT_KEEP_PUNCT = _build_preprocess_prompt(_QUOTE_RULE)
+
+
+def select_review_prompt(enable_preprocess: bool, skip_fullwidth_punct: bool = False) -> str:
+    """Gemini/Claude 兩邊共用的挑選邏輯。skip_fullwidth_punct 只在前置處理
+    有開時才有意義（沒開的 REVIEW_PROMPT 本來就不轉全形）。"""
+    if not enable_preprocess:
+        return REVIEW_PROMPT
+    return PREPROCESS_REVIEW_PROMPT_KEEP_PUNCT if skip_fullwidth_punct else PREPROCESS_REVIEW_PROMPT

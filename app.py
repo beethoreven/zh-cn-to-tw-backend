@@ -19,6 +19,11 @@ from configs import config
 from db_utils import app_versions, job_store
 from jobs import job_manager
 from output_utils.docx_export import docx_file_to_text, text_to_docx_bytes
+from pattern import analysis_manager as pattern_analysis_manager
+from pattern import engine as pattern_engine
+from pattern import report as pattern_report
+from pattern import template as pattern_template
+from pattern.analyzer import run_analysis as run_pattern_analysis
 from pipeline.orchestrator import run_refine_only_pipeline
 from review import review_manager
 from review.reviewer import run_review
@@ -726,10 +731,202 @@ def download_job(job_id):
 
     fmt = request.args.get("format", "txt").lower()
     basename = _download_basename(job.get("original_filename"), job_id)
+    if job.get("pattern_report") is not None:
+        # Stage 2 套用範本的結果，檔名跟原檔區隔開，避免下載後蓋掉原檔
+        basename += "_已套用範本"
     return _send_text_as(job["result_text"], fmt, basename)
 
 
-# --- Stage 2：二次校對 ---
+# --- Stage 2：通用修改（套用範本修改） ---
+#
+# 套用本身是純程式（pattern/engine.py），同步做完就回應；結果存成一個新的
+# job（result_text 是套用後的文字），所以下載、接續 Stage 3 校對都直接沿用
+# 既有的 /api/jobs/<id>/download、/api/jobs/<id>/review。分析報告（LLM）是
+# 選配的另一步，獨立成一筆 pattern_analysis 紀錄在背景跑，只提醒、不改字。
+
+_PATTERN_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "pattern.txt")
+
+
+def _load_default_pattern_template() -> str:
+    """每次都重讀檔案：維護者改 pattern.txt、commit、push、Render 部署之後
+    就生效，不需要動前端或重新打包桌面版（同 ta-notice.txt 的做法）。"""
+    with open(_PATTERN_TEMPLATE_PATH, encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/api/pattern-template")
+@require_auth
+def get_pattern_template():
+    text = _load_default_pattern_template()
+    parsed = pattern_template.parse_template(text)
+    return jsonify({"text": text, "rule_count": len(parsed.rules)})
+
+
+@app.post("/api/jobs/<job_id>/pattern")
+@require_auth
+def apply_pattern(job_id):
+    """對一個已經有結果的 job（Stage 1 的結果或直接上傳的檔案）套用範本。
+
+    body 的 template 有帶就用使用者的個人範本，沒帶就用 pattern.txt。個人
+    範本只活在前端記憶體裡（關掉 App 或重新整理就沒了），這裡用完就丟、
+    不會存起來，更不會蓋掉預設範本。前端選檔當下已經檢查過格式，這裡
+    還是再檢查一次——後端這份才是權威。"""
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
+    if job["result_text"] is None:
+        return jsonify({"error": "這個 job 還沒有結果，無法套用範本"}), 409
+
+    body = request.get_json(silent=True) or {}
+    custom_template = body.get("template")
+    if custom_template is not None and not isinstance(custom_template, str):
+        return jsonify({"error": "template 必須是文字"}), 400
+    template_text = custom_template if custom_template is not None else _load_default_pattern_template()
+
+    parsed = pattern_template.parse_template(template_text)
+    if not parsed.ok:
+        return jsonify(
+            {"error": "範本格式有問題", "details": pattern_template.format_issues(parsed.errors)}
+        ), 400
+    compiled = pattern_template.compile_rules(parsed.rules)
+
+    try:
+        result = pattern_engine.run(job["result_text"], compiled)
+    except RuntimeError as exc:
+        # engine 自我驗證沒過：寧可整個失敗，也不要回傳可能少了字的結果
+        return jsonify({"error": str(exc)}), 500
+
+    template_label = ("個人範本" if custom_template is not None else "預設範本") + f"（{len(parsed.rules)} 條規則）"
+    report_text = pattern_report.build_report(
+        result,
+        file_name=job.get("original_filename"),
+        template_label=template_label,
+        rule_order=[rule.source for rule in parsed.rules],
+        targets=compiled.targets,
+    )
+    word_hits = pattern_report.word_hits_for_analysis(result)
+    summary = {
+        "template_label": template_label,
+        "rules_total": len(parsed.rules),
+        "rules_hit": sum(1 for count in result.rule_counts.values() if count),
+        "rule_hits": result.rule_hits_total,
+        "punct_converted": result.punct_converted,
+        "spaces_removed": result.spaces_removed,
+        "paragraphs": len(result.paragraphs),
+        "changed_paragraphs": sum(1 for change in result.changes if change.para_no),
+    }
+
+    new_job_id = job_manager.create_job(
+        original_filename=job.get("original_filename"), user_email=request.user_email
+    )
+    # 先存報告等欄位、最後才 set_result（狀態變 done）：前端看到 done 的
+    # 當下，報告一定已經在了
+    job_manager.set_fields(
+        new_job_id,
+        source_job_id=job_id,
+        pattern_report=report_text,
+        pattern_word_hits=word_hits,
+        pattern_summary=summary,
+    )
+    job_manager.set_result(new_job_id, result.text)
+
+    return jsonify(
+        {
+            "job_id": new_job_id,
+            "summary": summary,
+            "warnings": pattern_template.format_issues(parsed.warnings),
+        }
+    )
+
+
+@app.get("/api/jobs/<job_id>/pattern-report")
+@require_auth
+def download_pattern_report(job_id):
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
+    report_text = job.get("pattern_report")
+    if report_text is None:
+        return jsonify({"error": "這個工作沒有套用範本的報告"}), 404
+    basename = _download_basename(job.get("original_filename"), job_id) + "_修改報告"
+    # 帶 BOM：舊版記事本之類的編輯器才不會把中文認成亂碼
+    buffer = io.BytesIO(("\ufeff" + report_text).encode("utf-8"))
+    return send_file(
+        buffer,
+        mimetype="text/plain; charset=utf-8",
+        as_attachment=True,
+        download_name=f"{basename}.txt",
+    )
+
+
+def _get_owned_pattern_analysis(analysis_id: str):
+    """邏輯跟 _get_owned_job 一樣：一定要是自己建立的才給資料。"""
+    analysis = pattern_analysis_manager.get_analysis(analysis_id)
+    if analysis is None or analysis.get("user_email") != request.user_email:
+        return None, (jsonify({"error": "找不到這份分析報告"}), 404)
+    return analysis, None
+
+
+@app.post("/api/jobs/<job_id>/pattern-analysis")
+@require_auth
+def start_pattern_analysis(job_id):
+    """對套用範本的結果跑分析報告（LLM）。跟套用分開成兩支，是為了讓
+    分析被中斷、或使用者想換 model 時可以單獨重跑，不必重新套用。"""
+    job, err = _get_owned_job(job_id)
+    if err:
+        return err
+    word_hits = job.get("pattern_word_hits")
+    if word_hits is None:
+        return jsonify({"error": "這個工作不是套用範本的結果，無法分析"}), 409
+
+    body = request.get_json(silent=True) or {}
+    try:
+        model = _parse_review_model(body.get("model"))
+        project = _require_project_id(body.get("project"))
+        max_retry = _parse_bounded_int(
+            body.get("max_retry"), config.REVIEW_MAX_RETRY, config.MAX_RETRY_MIN, config.MAX_RETRY_MAX,
+            "max_retry",
+        )
+        # 沒有字詞類的修改就不會呼叫 LLM，不需要擋個人專案的額度
+        if word_hits:
+            _validate_project_and_model(project, model)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    analysis_id = pattern_analysis_manager.create_analysis(job_id, request.user_email, model)
+    settings = {
+        "model": model,
+        "max_retry": max_retry,
+        "user_email": request.user_email,
+        "project": project,
+        "file_name": _basename_from_original(job.get("original_filename"), job_id),
+    }
+    thread = threading.Thread(
+        target=run_pattern_analysis, args=(analysis_id, word_hits, settings), daemon=True
+    )
+    thread.start()
+    return jsonify({"analysis_id": analysis_id}), 202
+
+
+@app.get("/api/pattern-analyses/<analysis_id>")
+@require_auth
+def get_pattern_analysis(analysis_id):
+    analysis, err = _get_owned_pattern_analysis(analysis_id)
+    if err:
+        return err
+    return jsonify(
+        {
+            "id": analysis["id"],
+            "status": analysis["status"],
+            "status_label": STATUS_LABELS.get(analysis["status"], analysis["status"]),
+            "logs": analysis["logs"],
+            "error": analysis["error"],
+            "items": analysis["items"],
+        }
+    )
+
+
+# --- Stage 3：二次校對 ---
 
 
 @app.get("/api/review-options")
@@ -794,6 +991,10 @@ def _parse_review_settings(form):
         # 生效，不進使用者勾選清單）。舊版前端/桌面殼不會帶這個參數，
         # 預設 False 維持原本行為不變。
         "enable_preprocess": _parse_bool(form.get("enable_preprocess"), False),
+        # 2.0 前端才會帶：前置處理不要把標點轉全形（2.0 改由 Stage 2 用程式
+        # 做掉）。1.x 沒有 Stage 2，不帶就維持原本會轉全形的行為，見
+        # review/prompts.py 檔頭
+        "skip_fullwidth_punct": _parse_bool(form.get("skip_fullwidth_punct"), False),
         # request 是 Flask 的 context-local proxy，這支函式只會在
         # request-handling 的路由裡被呼叫，直接拿 request.user_email
         # 是安全的（require_auth 裝飾器已經驗證過並存進去）
@@ -864,7 +1065,7 @@ def rerun_review(review_id):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # 前置處理（接合斷句、全形標點、整理引號）同一份文字做一次就夠了：
+    # 前置處理（接合斷句、整理標點與引號）同一份文字做一次就夠了：
     # 這裡拿到的 text 已經是上一輪前置處理過、再套用使用者勾選建議之後的
     # 版本，再整理一次只是多花一次額度、還可能把已經整理好的東西改壞。
     # 不管前端傳什麼一律強制關閉，不給覆寫的機會。

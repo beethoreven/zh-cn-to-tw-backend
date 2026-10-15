@@ -157,6 +157,7 @@ def _call_review_with_retry(
     file_name: str | None,
     project: int | None,
     enable_preprocess: bool,
+    skip_fullwidth_punct: bool,
     effective_max_chars: int,
 ) -> tuple[str | None, list[dict], bool]:
     """回傳 (前置處理後的文字, 這一批的校對建議, 這個 model 的額度是否已用盡)。
@@ -188,6 +189,7 @@ def _call_review_with_retry(
                 file_name=file_name,
                 project=project,
                 enable_preprocess=enable_preprocess,
+                skip_fullwidth_punct=skip_fullwidth_punct,
             )
             break
         except OutputTruncatedError as exc:
@@ -292,6 +294,8 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
     # 預設 False；「重新校對（用套用後的文字）」一律強制 False，同一份
     # 文字不需要整理第二次（見 app.py 的 rerun_review）。
     enable_preprocess = settings.get("enable_preprocess", False)
+    # 2.0 前端帶的：前置處理只整理引號、不轉全形（見 review/prompts.py）
+    skip_fullwidth_punct = settings.get("skip_fullwidth_punct", False)
     # 上一輪（或更早幾輪）使用者明確不想套用的建議，這輪要濾掉，
     # 不要重複拿同樣被否決過的東西煩使用者
     exclude_fingerprints = {tuple(fp) for fp in settings.get("exclude_fingerprints", [])}
@@ -311,9 +315,8 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
             review_id, f"校對文字共切成 {len(chunks)} 批（每批約 {effective_max_chars} 字，model={model}）"
         )
         if enable_preprocess:
-            review_manager.append_log(
-                review_id, "已開啟前置處理：接合斷句、全形標點符號、整理上下引號（直接套用，不列入勾選清單）"
-            )
+            items = "接合斷句、整理上下引號" if skip_fullwidth_punct else "接合斷句、全形標點符號、整理上下引號"
+            review_manager.append_log(review_id, f"已開啟前置處理：{items}（直接套用，不列入勾選清單）")
 
         all_findings = []
         # 前置處理開啟時，每一批都要往這裡放一段文字（整理後的，或失敗時
@@ -346,6 +349,7 @@ def run_review(review_id: str, text: str, settings: dict | None = None):
                     file_name,
                     project,
                     enable_preprocess,
+                    skip_fullwidth_punct,
                     effective_max_chars,
                 )
                 if quota_exhausted:
