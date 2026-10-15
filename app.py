@@ -34,11 +34,21 @@ app = Flask(__name__)
 
 # 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
 # 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
-# "null" 是桌面版 App：網頁前端現在用 file:// 直接從 .app 裡載入（不再
-# 透過本機 HTTP 伺服器供應——原因見 zh-cn-to-tw-mac 的 ContentView.swift），
-# 瀏覽器對 file:// 頁面發出的跨來源請求，Origin header 的值就是字面上
-# 的 "null"，不是空字串也不是省略，這裡要明確放行，不然桌面版 App 打
-# 任何 API 都會被 CORS 擋下來。
+# 桌面版 App 的網頁前端包在 App 裡、由殼直接載入，不同載入方式送出的
+# Origin 不一樣，三種都要放行，不然桌面版 App 打任何 API 都會被 CORS
+# 擋下來：
+# - "https://zh-cn-to-tw.example"：2.0 起的 Windows 版。殼用 WebView2 的
+#   虛擬主機對應，把網頁資料夾對應到這個固定網址（.example 是保留給範例
+#   用、保證不會有真實網站的網域）。見 zh-cn-to-tw-windows 的
+#   MainWindow.xaml.cs。
+# - "zhcntotw://app"：2.0 起的 Mac 版，殼用自訂 scheme 供應網頁。跟
+#   Windows 版一樣是固定來源，登入狀態（localStorage）才能跨次啟動保留。
+# - "null"：2.0 以前的桌面版用 file:// 載入（原因見 zh-cn-to-tw-mac 的
+#   ContentView.swift），瀏覽器對 file:// 頁面發出的跨來源請求，Origin
+#   header 的值就是字面上的 "null"，不是空字串也不是省略。舊版 App 還
+#   有人在用，要等確定沒人用了才能拿掉。
+# 換掉 file:// 的原因是它不能用 ES module（瀏覽器把 file:// 當成沒有
+# 來源，module 會被 CORS 擋下），而前端要拆成多個檔案。
 # allow_headers 要明確帶 Authorization——登入後每次 API 呼叫都會帶
 # `Authorization: Bearer <session token>`（見 auth_utils/sessions.py：
 # 這是應用程式自己簽發的長效憑證，不是 Google ID Token 本身，Google
@@ -54,6 +64,8 @@ CORS(
         "https://beethoreven.github.io",
         r"http://localhost:\d+",
         r"http://127\.0\.0\.1:\d+",
+        "https://zh-cn-to-tw.example",
+        "zhcntotw://app",
         "null",
     ],
     allow_headers=["Content-Type", "Authorization"],
