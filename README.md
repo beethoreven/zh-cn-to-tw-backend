@@ -102,6 +102,8 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 **半形空格刻意不動**：原本還有一步「刪除半形空格」（夾在兩個英文字母／數字中間的保留），2026-10-15 拿掉了。劇本裡常有英文，空格很常見，刪錯幾乎救不回來；真的要刪的人自己一次全部取代就好，不值得讓程式替所有人冒這個險。範本規則裡也不能有空白（空白肉眼看不出來，多打一個就會讓規則默默對不上）。
 
+**英文句子裡的標點也照轉，這是刻意的**：例如 `He said, "OK!"` 會變成 `He said， "OK！"`。判斷標準是「做錯能不能一口氣改回來」：轉錯的標點一次取代就能轉回去，刪掉的空格卻救不回來，所以標點照轉、空格不動。曾經考慮過「英文中間的標點不轉」這種判斷，但規則複雜、處理的又不是麻煩的問題，刻意不做。
+
 **規則怎麼套**：所有規則編成一個 regex，單趟掃過。長的規則優先（「依依不舍」要先於「不舍」被比對到），改完的結果不會再被另一條規則改一次。「修改後」包含「修改前」的規則（例如 `石翁 → 石翁仲`）會自動加上前後排除條件：原文已經是「石翁仲」的地方不會變成「石翁仲仲」，同一份文字重跑也不會越改越長。
 
 **範本格式與檢查**：一行一條「修改前 → 修改後」，`#` 開頭是註解。會擋下、不採用的錯誤：箭頭不是剛好一個、某一邊是空的、規則裡有空白、同一個「修改前」對應到不同的「修改後」、超過 5000 條或 50 萬字。照用但會提醒的警告：完全重複、修改前後一樣、純標點的規則（標點已經由固定步驟處理）。前端選檔當下就用同一套規則（`zh-cn-to-tw-web` 的 `js/stages/pattern-template.js`，訊息逐字相同）先檢查，格式有問題當場報錯；後端套用時會再檢查一次，後端這份才是權威。
@@ -436,6 +438,8 @@ This feature grew out of a real manual workflow: applying a "before → after" l
 **Processing order and the hard rule**: each line is processed on its own, in a fixed order: convert half-width punctuation to full-width (the seven characters `, ! ? : ; ( )`; a comma or colon between two digits is left alone, e.g. 1,000 or 12:30) → apply the template rules. The hard rule is "apart from these two kinds of edits, not a single character may go missing", spaces, line breaks, and blank lines included. At the end, `run()` recomputes the whole text independently, in a deliberately different way, and compares line counts; on any mismatch it returns a 500 — failing outright is better than returning a result that might have lost characters.
 
 **Half-width spaces are deliberately left alone**: there used to be one more step, "delete half-width spaces" (keeping a space between two ASCII letters/digits); it was removed on 2026-10-15. Scripts often contain English, where spaces are everywhere, and a wrongly deleted space is close to impossible to put back; anyone who really wants them gone can replace them all in one go themselves, so it isn't worth having the program take that risk for everyone. Template rules can't contain whitespace either (whitespace is invisible, and one stray space makes a rule silently never match).
+
+**Punctuation inside English sentences is converted too, deliberately**: for example `He said, "OK!"` becomes `He said， "OK！"`. The yardstick is "can a mistake be undone in one go": wrongly converted punctuation goes back with a single find-and-replace, while deleted spaces can't be recovered — so punctuation is converted and spaces are left alone. A rule like "don't convert punctuation inside English" was considered, but it is complicated and solves a problem that isn't much trouble, so it is deliberately not done.
 
 **How rules are applied**: all rules are compiled into one regex and applied in a single pass. Longer rules win ("依依不舍" must be matched before "不舍"), and text produced by one rule is never rewritten by another. A rule whose "after" contains its "before" (e.g. `石翁 → 石翁仲`) automatically gets lookbehind/lookahead guards: text that already reads "石翁仲" does not become "石翁仲仲", and re-running on the same text never keeps growing it.
 
