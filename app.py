@@ -811,7 +811,6 @@ def apply_pattern(job_id):
         "rules_hit": sum(1 for count in result.rule_counts.values() if count),
         "rule_hits": result.rule_hits_total,
         "punct_converted": result.punct_converted,
-        "spaces_removed": result.spaces_removed,
         "paragraphs": len(result.paragraphs),
         "changed_paragraphs": sum(1 for change in result.changes if change.para_no),
     }

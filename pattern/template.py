@@ -13,7 +13,7 @@ js/features/pattern-template.js），讓使用者選個人範本檔案的當下�
 會讓整份範本被拒絕的錯誤（errors）：
 - 這一行不是剛好一個「→」
 - 「→」左邊或右邊是空的
-- 規則裡有空白（套用前會先刪掉半形空格，含空白的規則永遠對不上）
+- 規則裡有空白（空白肉眼看不出來，多打一個就會讓規則默默對不上）
 - 同一個「修改前」對到兩個不同的「修改後」（不知道該聽哪一條）
 - 規則太多或範本太大
 
@@ -85,7 +85,7 @@ def parse_template(text: str) -> ParsedTemplate:
             continue
         if _WHITESPACE.search(source) or _WHITESPACE.search(target):
             result.errors.append(
-                (line_no, f"規則裡不能有空白（套用前會先刪掉半形空格，含空白的規則永遠對不上）：{line}")
+                (line_no, f"規則裡不能有空白（空白肉眼看不出來，多打一個就會讓規則默默對不上）：{line}")
             )
             continue
         if source == target:

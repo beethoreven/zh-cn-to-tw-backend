@@ -18,7 +18,7 @@
 主持人／劇本負責人拿到的劇本殺劇本經常是簡體中文 PDF，需要先轉成台灣慣用的繁體中文才能給玩家使用。這個工具把「OCR 辨識 → 簡轉繁 → LLM 潤飾 → 人工校對」這條原本要手工做的流程自動化，2.0 起分成三個階段（1.x 只有 Stage 1 跟「Stage 2 校對」兩個，1.x 的 Stage 2 就是現在的 Stage 3）:
 
 - **Stage 1（簡轉繁）**:上傳 PDF，自動 OCR + 簡轉繁 + LLM 潤飾（斷句、標點、修正 OCR 誤植錯字），輸出可下載的 .txt/.docx。
-- **Stage 2（通用修改／套用範本修改，2.0 新增）**:對 Stage 1 的輸出（或直接上傳的檔案）用程式套用一份「修改前 → 修改後」的替換範本，同時刪除半形空格、把半形標點轉成全形，產出逐筆列出前後文的修改報告。可選擇請 LLM 看過字詞類的修改、提醒可能改錯的地方（只提醒、不改字）。
+- **Stage 2（通用修改／套用範本修改，2.0 新增）**:對 Stage 1 的輸出（或直接上傳的檔案）用程式套用一份「修改前 → 修改後」的替換範本，同時把半形標點轉成全形（半形空格一律不動），產出逐筆列出前後文的修改報告。可選擇請 LLM 看過字詞類的修改、提醒可能改錯的地方（只提醒、不改字）。
 - **Stage 3（校對）**:對前面的輸出（或直接上傳已經是繁體的檔案）再跑一輪 LLM 校對，抓用詞/錯字/標點問題，結構化清單讓使用者逐筆勾選要不要套用。
 
 人工校對依然是必須的，但這個工具省下大部分前置作業的人力。
@@ -98,7 +98,9 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 這個功能是從實際的人工流程長出來的：把一份「修改前 → 修改後」清單套到將近兩百頁的劇本 docx 上，逐份核對之後確認，這類「幾乎一定可以直接換」的修改交給程式做，召回率跟正確性都比交給 LLM 穩，而且每次結果都一樣。所以**套用跟產生報告都是純程式**（`pattern/engine.py`、`pattern/report.py`），不呼叫任何 LLM。LLM 只用在選配的「分析報告」，而且只看「字詞類規則改到的地方＋前後文」，不看全文。標點轉換的命中刻意不送給 LLM（數量大、幾乎不會錯），也刻意不做跨檔對照——目的是把 AI 的介入程度壓在「提醒」，最後一律由人來看。
 
-**處理順序與底線**：每一行各自處理，順序固定：刪除半形空格（夾在兩個英文字母／數字中間的保留，避免英文字黏在一起）→ 半形標點轉全形（`, ! ? : ; ( )` 這七個；逗號、冒號夾在兩個數字中間的不轉，例如 1,000、12:30）→ 套用範本規則。底線是「除了這三種修改，一個字都不能少」，換行跟空行也算在內。`run()` 最後會用另一種寫法對整份文字獨立重算一次、再比對行數，對不上就直接回 500——寧可整個失敗，也不回傳可能少了字的結果。
+**處理順序與底線**：每一行各自處理，順序固定：半形標點轉全形（`, ! ? : ; ( )` 這七個；逗號、冒號夾在兩個數字中間的不轉，例如 1,000、12:30）→ 套用範本規則。底線是「除了這兩種修改，一個字都不能少」，空格、換行跟空行也算在內。`run()` 最後會用另一種寫法對整份文字獨立重算一次、再比對行數，對不上就直接回 500——寧可整個失敗，也不回傳可能少了字的結果。
+
+**半形空格刻意不動**：原本還有一步「刪除半形空格」（夾在兩個英文字母／數字中間的保留），2026-10-15 拿掉了。劇本裡常有英文，空格很常見，刪錯幾乎救不回來；真的要刪的人自己一次全部取代就好，不值得讓程式替所有人冒這個險。範本規則裡也不能有空白（空白肉眼看不出來，多打一個就會讓規則默默對不上）。
 
 **規則怎麼套**：所有規則編成一個 regex，單趟掃過。長的規則優先（「依依不舍」要先於「不舍」被比對到），改完的結果不會再被另一條規則改一次。「修改後」包含「修改前」的規則（例如 `石翁 → 石翁仲`）會自動加上前後排除條件：原文已經是「石翁仲」的地方不會變成「石翁仲仲」，同一份文字重跑也不會越改越長。
 
@@ -238,7 +240,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 ### 修改 Stage 2 的預設範本（pattern.txt）
 
-1. 編輯這個 repo 根目錄的 `pattern.txt`：一行一條，寫成 `修改前 → 修改後`（中間的箭頭是全形的「→」，前後各一個半形空格），`#` 開頭的行是註解。半形空格跟半形標點不用寫成規則，Stage 2 會自動處理。
+1. 編輯這個 repo 根目錄的 `pattern.txt`：一行一條，寫成 `修改前 → 修改後`（中間的箭頭是全形的「→」，前後各一個半形空格），`#` 開頭的行是註解。半形標點不用寫成規則，Stage 2 會自動轉全形；半形空格一律不會被動到，規則裡也不能有空白。
 2. 在這個 repo 的資料夾裡檢查格式（用 Part A 建好的虛擬環境）：
 
    ```bash
@@ -351,7 +353,7 @@ This is the backend API for a tool that converts Simplified-Chinese murder-myste
 Game-master / scripts owner often get MMG script in Simplified-Chinese PDFs and need converting to the Traditional Chinese used in Taiwan before players can use them. This tool automates "OCR → Simplified-to-Traditional conversion → LLM polish → human proofreading". Since 2.0 it has three stages (1.x had only Stage 1 and "Stage 2 Proofread"; 1.x's Stage 2 is today's Stage 3):
 
 - **Stage 1 (Convert)**: upload a PDF → OCR + conversion + LLM polish (sentence breaks, punctuation, fixing obvious OCR misreads) → downloadable .txt/.docx.
-- **Stage 2 (General Edits / Apply Template, new in 2.0)**: apply a "before → after" replacement template to Stage 1's output (or a directly-uploaded file) in plain code, while also deleting half-width spaces and converting half-width punctuation to full-width, and produce an edit report that lists every change with its surrounding text. Optionally, an LLM can look over the word-level edits and flag ones that may be wrong (it only flags; it never changes text).
+- **Stage 2 (General Edits / Apply Template, new in 2.0)**: apply a "before → after" replacement template to Stage 1's output (or a directly-uploaded file) in plain code, while also converting half-width punctuation to full-width (half-width spaces are never touched), and produce an edit report that lists every change with its surrounding text. Optionally, an LLM can look over the word-level edits and flag ones that may be wrong (it only flags; it never changes text).
 - **Stage 3 (Proofread)**: run another LLM pass over the earlier output (or a directly-uploaded already-Traditional file) to catch wording/typo/punctuation issues, presented as a structured checklist the user selectively applies.
 
 Human review is still required, but this tool removes most of the manual prep work.
@@ -431,7 +433,9 @@ Because distance is no longer the bottleneck, two previously-scoped optimization
 
 This feature grew out of a real manual workflow: applying a "before → after" list to screenplay docx files close to two hundred pages long and checking every result showed that for this kind of near-certain replacement, plain code gives steadier recall and accuracy than an LLM, and the same result every time. So **applying the template and producing the report are pure code** (`pattern/engine.py`, `pattern/report.py`) and call no LLM. The LLM is used only for the optional "analysis report", and it only sees the places word-level rules changed plus their surrounding text, never the full text. Punctuation hits are deliberately not sent to the LLM (there are many of them and they are almost never wrong), and there is deliberately no cross-file comparison — the point is to keep the AI's involvement at "flagging"; a human always reviews in the end.
 
-**Processing order and the hard rule**: each line is processed on its own, in a fixed order: delete half-width spaces (a space between two ASCII letters/digits is kept, so English words don't get glued together) → convert half-width punctuation to full-width (the seven characters `, ! ? : ; ( )`; a comma or colon between two digits is left alone, e.g. 1,000 or 12:30) → apply the template rules. The hard rule is "apart from these three kinds of edits, not a single character may go missing", line breaks and blank lines included. At the end, `run()` recomputes the whole text independently, in a deliberately different way, and compares line counts; on any mismatch it returns a 500 — failing outright is better than returning a result that might have lost characters.
+**Processing order and the hard rule**: each line is processed on its own, in a fixed order: convert half-width punctuation to full-width (the seven characters `, ! ? : ; ( )`; a comma or colon between two digits is left alone, e.g. 1,000 or 12:30) → apply the template rules. The hard rule is "apart from these two kinds of edits, not a single character may go missing", spaces, line breaks, and blank lines included. At the end, `run()` recomputes the whole text independently, in a deliberately different way, and compares line counts; on any mismatch it returns a 500 — failing outright is better than returning a result that might have lost characters.
+
+**Half-width spaces are deliberately left alone**: there used to be one more step, "delete half-width spaces" (keeping a space between two ASCII letters/digits); it was removed on 2026-10-15. Scripts often contain English, where spaces are everywhere, and a wrongly deleted space is close to impossible to put back; anyone who really wants them gone can replace them all in one go themselves, so it isn't worth having the program take that risk for everyone. Template rules can't contain whitespace either (whitespace is invisible, and one stray space makes a rule silently never match).
 
 **How rules are applied**: all rules are compiled into one regex and applied in a single pass. Longer rules win ("依依不舍" must be matched before "不舍"), and text produced by one rule is never rewritten by another. A rule whose "after" contains its "before" (e.g. `石翁 → 石翁仲`) automatically gets lookbehind/lookahead guards: text that already reads "石翁仲" does not become "石翁仲仲", and re-running on the same text never keeps growing it.
 
@@ -574,7 +578,7 @@ choose to retry, but it's still a real interruption).
 
 ### Editing Stage 2's Default Template (pattern.txt)
 
-1. Edit `pattern.txt` at this repo's root: one rule per line, written as `before → after` (the arrow is the full-width "→" with one half-width space on each side); lines starting with `#` are comments. Half-width spaces and half-width punctuation don't need rules — Stage 2 handles them automatically.
+1. Edit `pattern.txt` at this repo's root: one rule per line, written as `before → after` (the arrow is the full-width "→" with one half-width space on each side); lines starting with `#` are comments. Half-width punctuation doesn't need rules — Stage 2 converts it to full-width automatically; half-width spaces are never touched, and rules can't contain whitespace.
 2. In this repo's folder, check the format (using the virtual environment from Part A):
 
    ```bash

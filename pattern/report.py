@@ -29,7 +29,7 @@ def _mark(text: str, spans: list[tuple[int, int]]) -> str:
 
 
 def _before_rules(change: LineChange) -> tuple[str, list[tuple[int, int]]]:
-    """把規則替換倒回去，得到「去空格、轉標點之後、套規則之前」的那一行，
+    """把規則替換倒回去，得到「轉標點之後、套規則之前」的那一行，
     以及每個被改片段在那一行裡的位置。"""
     out = []
     spans = []
@@ -69,7 +69,6 @@ def build_report(
     w = lines.append
     rule_changes = [c for c in result.changes if c.rule_hits]
     punct_changes = [c for c in result.changes if c.punct_converted]
-    space_changes = [c for c in result.changes if c.spaces_removed]
 
     w("套用範本修改報告")
     w("=" * 40)
@@ -80,20 +79,16 @@ def build_report(
     w("說明")
     w("- 段落編號＝下載成 docx 之後的段落順序（空行不算）。")
     w("- 【】標出被改的位置，只是報告裡的標記，文件裡沒有。")
-    w("- 處理順序：先刪半形空格，再把半形標點轉全形，最後套用範本規則。")
-    w("- 除了這三種修改，其他任何字元都沒有動。")
+    w("- 處理順序：先把半形標點轉全形，再套用範本規則。")
+    w("- 除了這兩種修改，其他任何字元都沒有動（半形空格也一律保留）。")
     w("")
     w(
         f"總計：範本規則修改 {result.rule_hits_total} 處（{len(rule_changes)} 段）；"
         f"半形標點轉全形 {result.punct_converted} 個（{len(punct_changes)} 段）；"
-        f"刪除半形空格 {result.spaces_removed} 個（{len(space_changes)} 段）；"
         f"全文共 {len(result.paragraphs)} 段。"
     )
-    if result.skipped_spaces or result.skipped_punct:
-        w(
-            f"刻意保留沒動的：夾在英文字母／數字之間的半形空格 {result.skipped_spaces} 個、"
-            f"夾在數字之間的逗號或冒號 {result.skipped_punct} 個（例如 1,000、12:30）。"
-        )
+    if result.skipped_punct:
+        w(f"刻意保留沒動的：夾在數字之間的逗號或冒號 {result.skipped_punct} 個（例如 1,000、12:30）。")
     w("")
 
     w("一、各規則命中次數")
@@ -139,31 +134,7 @@ def build_report(
             spans = [(p, p + 1) for p in change.punct_positions]
             w(f"{_para_label(change)}（{change.punct_converted} 個）：{_mark(change.final, spans)}")
     w("")
-
-    w("四、刪除的半形空格（依段落，␣ 是被刪掉的空格原本的位置）")
-    w("-" * 40)
-    if not space_changes:
-        w("（無）")
-    for change in space_changes:
-        shown = _show_removed_spaces(change.original)
-        w(f"{_para_label(change)}（{change.spaces_removed} 個）：{shown}")
-    w("")
     return "\n".join(lines)
-
-
-def _show_removed_spaces(original: str) -> str:
-    """用跟 engine._remove_spaces 一樣的判斷，把會被刪掉的空格畫成 ␣。"""
-    from pattern.engine import _ASCII_ALNUM, _SPACE_RUN
-
-    def repl(match):
-        start, end = match.span()
-        before = original[start - 1:start]
-        after = original[end:end + 1]
-        if _ASCII_ALNUM.match(before) and _ASCII_ALNUM.match(after):
-            return match.group(0)
-        return "␣" * (end - start)
-
-    return _SPACE_RUN.sub(repl, original)
 
 
 def _clip(text: str, center_start: int, center_end: int, width: int) -> str:
@@ -173,8 +144,8 @@ def _clip(text: str, center_start: int, center_end: int, width: int) -> str:
 
 
 def word_hits_for_analysis(result: PatternResult) -> list[dict]:
-    """分析報告（LLM）要看的清單：只有範本規則造成的修改，不含標點與空格
-    （那兩種是機械性的轉換，交給 LLM 只是浪費額度，使用者也明確說不要）。
+    """分析報告（LLM）要看的清單：只有範本規則造成的修改，不含標點轉換
+    （那是機械性的轉換，交給 LLM 只是浪費額度，使用者也明確說不要）。
     每一筆是一個「規則命中」，同一段有兩筆就是兩項。"""
     items = []
     for change in result.changes:
