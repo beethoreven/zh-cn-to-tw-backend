@@ -36,6 +36,10 @@ from usage.usage_log import (
 )
 
 app = Flask(__name__)
+# 回應的 JSON 直接用 UTF-8，不要把每個中文字轉成 \uXXXX（大一倍）。前端每
+# 5 秒輪詢一次進度，回應裡的 log、建議清單都是中文，這些流量 Render 會算進
+# outbound bandwidth。瀏覽器解析出來的內容完全一樣。
+app.json.ensure_ascii = False
 
 # 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
 # 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
@@ -1099,7 +1103,11 @@ def get_review(review_id):
             "status_label": STATUS_LABELS.get(review["status"], review["status"]),
             "logs": review["logs"],
             "error": review["error"],
-            "findings": review["findings"],
+            # 還在跑的時候不帶建議清單：前端（含 1.x）只在 done 之後、或中斷
+            # 收尾後重新查一次時才讀 findings，跑到一半每 5 秒送一次完整清單
+            # 全部被丟掉，卻是輪詢流量的大宗。結束狀態（done/failed/
+            # interrupted）照舊帶上。
+            "findings": [] if review["status"] in ("pending", "running") else review["findings"],
             "has_applied": review["applied_text"] is not None,
             "has_partial": bool(review.get("partial_findings")),
         }

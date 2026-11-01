@@ -67,6 +67,10 @@ def save(job_id: str, kind: str, status: str, user_email: str | None, payload: d
         with _throttle_lock:
             _last_write[job_id] = time.time()
 
+    # ensure_ascii=False：預設會把每個中文字寫成 \uXXXX（6 bytes），比 UTF-8
+    # 的 3 bytes 大一倍。整包狀態每批都要送一次 Neon，而 Render 會把連到 Neon
+    # 的流量算進 outbound bandwidth（2026-10 實測這裡佔了八成以上）。存進
+    # JSONB 之後內容完全一樣，只差傳輸大小。
     try:
         conn, cur = get_ready_conn()
         try:
@@ -78,7 +82,7 @@ def save(job_id: str, kind: str, status: str, user_email: str | None, payload: d
                     "status = EXCLUDED.status, payload = EXCLUDED.payload, "
                     "updated_at = EXCLUDED.updated_at"
                 ),
-                (job_id, kind, user_email, status, json.dumps(payload), _now_iso(), _now_iso()),
+                (job_id, kind, user_email, status, json.dumps(payload, ensure_ascii=False), _now_iso(), _now_iso()),
             )
             conn.commit()
         finally:
