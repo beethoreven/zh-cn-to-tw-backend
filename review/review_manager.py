@@ -21,6 +21,14 @@ _reviews = {}
 _KIND = "review"
 
 
+def _active_ids() -> list[str]:
+    with _lock:
+        return [k for k, v in _reviews.items() if v["status"] not in job_store.TERMINAL_STATUSES]
+
+
+job_store.register_active_source(_active_ids)
+
+
 def _persist(review_id: str, *, force: bool = True) -> None:
     with _lock:
         review = _reviews.get(review_id)
@@ -117,6 +125,8 @@ def set_status(review_id: str, status: str):
         review = _reviews.get(review_id)
         if review is None:
             return
+        if review["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         review["status"] = status
     _persist(review_id)
 
@@ -162,6 +172,8 @@ def set_findings(review_id: str, findings: list[dict]):
         review = _reviews.get(review_id)
         if review is None:
             return
+        if review["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         for idx, finding in enumerate(findings):
             finding["id"] = idx
         review["findings"] = findings
@@ -174,6 +186,8 @@ def set_error(review_id: str, error: str):
         review = _reviews.get(review_id)
         if review is None:
             return
+        if review["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         review["error"] = error
         review["status"] = "failed"
     _persist(review_id)
@@ -254,9 +268,15 @@ def apply_selected(review_id: str, selected_ids: set[int]) -> str:
 
 def finalize_with_partial(review_id: str) -> bool:
     """使用者在中斷對話窗選「結束此階段工作」時呼叫：把中斷前已經校對出來
-    的建議當成最終結果收尾。回傳是否真的有東西可以收。"""
+    的建議當成最終結果收尾。回傳是否真的有東西可以收。
+
+    只接受 interrupted，理由同 job_manager.finalize_with_partial。"""
     review = get_review(review_id)
     if review is None:
+        return False
+    if review["status"] == "done" and review.get("finalized_from_partial"):
+        return True
+    if review["status"] != "interrupted":
         return False
     partial = review.get("partial_findings") or review.get("findings") or []
     if not partial:
@@ -266,11 +286,15 @@ def finalize_with_partial(review_id: str) -> bool:
         finding["id"] = idx
 
     with _lock:
-        if review_id not in _reviews:
-            _reviews[review_id] = review
-        _reviews[review_id]["findings"] = partial
-        _reviews[review_id]["status"] = "done"
-        _reviews[review_id]["logs"].append({
+        current = _reviews.get(review_id)
+        if current is None:
+            _reviews[review_id] = current = review
+        elif current["status"] != "interrupted":
+            return current["status"] == "done" and bool(current.get("finalized_from_partial"))
+        current["findings"] = partial
+        current["status"] = "done"
+        current["finalized_from_partial"] = True
+        current["logs"].append({
             "time": time.time(),
             "level": "warning",
             "message": "校對中途被伺服器重啟打斷，已改用中斷前完成的部分建議收尾",

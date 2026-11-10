@@ -82,18 +82,43 @@ CORS(
 )
 
 
-def _startup_recover_jobs() -> None:
-    """process 啟動時，把資料庫裡還停在 pending/running 的工作標成
-    interrupted。這個 process 是新起來的，照定義不可能還有執行緒在跑
-    那些工作——不標記的話，前端會永遠看到「執行中」而不會跳出重試
-    對話窗，變成無聲卡死。詳見 db_utils/job_store.py 的說明。
+# 啟動後至少掃這麼久，才允許因為「不是自己的未完成工作已經沒了」而停掉：
+# 部署交接時舊實例可能還會收到幾個請求、建立新工作，太早停會漏掉它們。
+_STALE_SWEEP_MIN_SECONDS = 600
 
-    在背景執行緒做：這一步要連 Neon（冷啟動可能近 10 秒），不能擋住
-    web server 開始接受連線。"""
-    def run():
-        count = job_store.mark_running_as_interrupted()
-        if count:
-            print(f"[startup] 已將 {count} 筆未完成的工作標記為中斷", flush=True)
+
+def _startup_recover_jobs() -> None:
+    """兩條背景執行緒，詳見 db_utils/job_store.py 模組說明第 3 點：
+
+    1. 心跳＋中斷標記：自己記憶體裡還在跑的工作定期更新心跳；啟動後的
+       一段時間內，把不是自己的、而且已經沒有心跳的 pending/running 標成
+       interrupted。不標記的話，前端會永遠看到「執行中」而不會跳出重試
+       對話窗，變成無聲卡死。原本是「啟動時把 pending/running 全部標成
+       interrupted」，部署時新舊實例重疊就會誤標還在跑的工作，最後讓它
+       永遠停在 running。
+    2. 每小時清一次過期的工作紀錄與閒置 session。
+
+    都在背景執行緒做：要連 Neon（冷啟動可能近 10 秒），不能擋住 web
+    server 開始接受連線。"""
+    def heartbeat_and_sweep():
+        started = time.time()
+        sweeping = True
+        while True:
+            try:
+                own = job_store.local_active_ids()
+                job_store.touch_active(own)
+                if sweeping:
+                    marked, remaining = job_store.mark_stale_as_interrupted(own)
+                    if marked:
+                        print(f"[startup] 已將 {marked} 筆沒有心跳的未完成工作標記為中斷", flush=True)
+                    if remaining == 0 and time.time() - started >= _STALE_SWEEP_MIN_SECONDS:
+                        sweeping = False
+            except Exception as exc:  # noqa: BLE001
+                # 整條迴圈是同一個執行緒，拋一次例外就再也不會有心跳
+                print(f"[heartbeat] 失敗，下一輪再試：{exc}", flush=True)
+            time.sleep(job_store.HEARTBEAT_INTERVAL)
+
+    def cleanup():
         while True:
             removed = job_store.delete_expired()
             if removed:
@@ -109,7 +134,8 @@ def _startup_recover_jobs() -> None:
                 print(f"[cleanup] session 清理失敗，下一輪再試：{exc}", flush=True)
             time.sleep(3600)
 
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=heartbeat_and_sweep, daemon=True).start()
+    threading.Thread(target=cleanup, daemon=True).start()
 
 
 _startup_recover_jobs()
@@ -674,6 +700,10 @@ def finalize_job(job_id):
     job, err = _get_owned_job(job_id)
     if err:
         return err
+    if job["status"] != "interrupted" and not (
+        job["status"] == "done" and job.get("finalized_from_partial")
+    ):
+        return jsonify({"error": "這個工作沒有被中斷，不能用中斷前的進度收尾"}), 409
     if not job_manager.finalize_with_partial(job_id):
         return jsonify({"error": "這個工作沒有任何已完成的部分可以保留"}), 409
     return jsonify({"status": "done"})
@@ -1122,6 +1152,10 @@ def finalize_review(review_id):
     review, err = _get_owned_review(review_id)
     if err:
         return err
+    if review["status"] != "interrupted" and not (
+        review["status"] == "done" and review.get("finalized_from_partial")
+    ):
+        return jsonify({"error": "這次校對沒有被中斷，不能用中斷前的進度收尾"}), 409
     if not review_manager.finalize_with_partial(review_id):
         return jsonify({"error": "這次校對沒有任何已完成的部分可以保留"}), 409
     return jsonify({"status": "done"})

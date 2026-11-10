@@ -112,7 +112,7 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 **結果與報告**：套用結果存成一個新的 job（`result_text` 是套用後的文字），所以下載、接續 Stage 3 校對都直接沿用既有的 `/api/jobs/<id>/download` 與 `/api/jobs/<id>/review`。報告跟命中清單存在同一個 job 的 payload 裡（`pattern_report`、`pattern_word_hits`、`pattern_summary`），`jobs` 表的 payload 本來就是整份 JSON，所以不需要改資料表。下載的檔名分別加上 `_已套用範本` 與 `_修改報告`，避免蓋掉原檔；報告是帶 BOM 的 UTF-8 txt，舊版記事本打開也不會亂碼。
 
-**分析報告**：刻意做成一筆獨立的 `kind="pattern_analysis"` 紀錄、有自己的 status，而不是掛在套用結果上的一個欄位——這樣伺服器重啟時，`mark_running_as_interrupted` 會把還在跑的分析標成 interrupted，前端就知道要提示使用者重新分析，不會永遠停在「分析中」（known-issue-check 第 14 條）。每 40 筆送一次 LLM，每批做完就先存一次部分結果；LLM 回傳不存在的編號會被丟掉。沒有字詞類的修改就不會呼叫 LLM，也就不檢查個人專案的 model 限制。
+**分析報告**：刻意做成一筆獨立的 `kind="pattern_analysis"` 紀錄、有自己的 status，而不是掛在套用結果上的一個欄位——這樣伺服器重啟時，`mark_stale_as_interrupted` 會把沒人在跑的分析標成 interrupted，前端就知道要提示使用者重新分析，不會永遠停在「分析中」（known-issue-check 第 14 條）。每 40 筆送一次 LLM，每批做完就先存一次部分結果；LLM 回傳不存在的編號會被丟掉。沒有字詞類的修改就不會呼叫 LLM，也就不檢查個人專案的 model 限制。
 
 **Stage 3 校對的配套修改**：半形轉全形原本是校對「前置處理」叫 LLM 做的，2.0 改成在 Stage 2 用程式做掉，LLM 少一件事。但 prompt 不能直接改：1.x 的桌面版沒有 Stage 2，後端一改，還沒升級的人校對時就沒人轉全形了。所以 `review/prompts.py` 保留兩個版本，只有 2.0 前端帶 `skip_fullwidth_punct=true` 時才用不轉全形的那個；沒帶參數的請求拿到的 prompt 跟改版前逐字相同（有測試直接比對過）。使用者跳過 Stage 2 直接校對時，標點就不會被轉成全形——這是刻意的，跳過 Stage 2 通常就是不想轉。
 
@@ -144,7 +144,7 @@ validators/               輸出驗證（例如殘留簡體字檢查）
 - `usage.db`（現在是 Neon 裡的 `usage_log` 表）記的是「本工具打了幾次」，不是 Google/Anthropic 官方帳務系統的即時數字，兩邊會有落差。
 - Stage 3（校對）的「套用」是逐批次做局部字串替換，同一批次內同樣的錯字重複出現兩次以上，目前只會替換第一次出現的位置。
 - Stage 2 的範本規則一律在單一行內比對，不會跨行；也不分辨詞的邊界，太短的規則容易跨詞誤中（例如「這只」會改到「這只是…」）。這正是分析報告要提醒的東西，維護 `pattern.txt` 時也要留意。
-- 本機跑的 backend 跟 Render 連的是同一個 Neon 資料庫，而任何一邊啟動時都會把 DB 裡 `pending`/`running` 的工作標成 `interrupted`（`db_utils/job_store.py` 假設只有單一實例）。本機啟動前要先確認沒有人在跑工作，見架設 SOP「Part A 5. 啟動」。
+- 本機跑的 backend 跟 Render 連的是同一個 Neon 資料庫，任何一邊啟動後都會把 DB 裡「不是自己的、超過 90 秒沒有心跳」的 `pending`/`running` 標成 `interrupted`（2026-11-10 起改用心跳判斷，原本是啟動時不分青紅皂白全部標掉，部署時新舊實例重疊會誤標，見 `db_utils/job_store.py` 模組說明第 3 點）。正在跑的實例每 20 秒會替自己的工作更新心跳，所以不會被誤標；保險起見本機啟動前還是先確認沒有人在跑工作，見架設 SOP「Part A 5. 啟動」。
 
 ---
 
@@ -194,7 +194,7 @@ cp .env.example .env
 
 ### 5. 啟動
 
-本機 backend 連的是正式的 Neon 資料庫，**一啟動就會把 DB 裡所有 running 的工作標成 `interrupted`**——如果剛好有人在 Render 上跑工作，他的狀態會被改到。啟動前先確認回傳是 `{"active": 0}`:
+本機 backend 連的是正式的 Neon 資料庫，啟動後會把 DB 裡沒有心跳的未完成工作標成 `interrupted`。Render 上正在跑的工作每 20 秒會更新心跳，照理不會被誤標，但這是正式資料，保險起見啟動前先確認回傳是 `{"active": 0}`:
 
 ```bash
 curl https://zh-cn-to-tw-backend.onrender.com/api/jobs/active
@@ -449,7 +449,7 @@ This feature grew out of a real manual workflow: applying a "before → after" l
 
 **Result and report**: the applied result is saved as a new job (`result_text` is the edited text), so downloading and continuing to Stage 3 proofreading reuse the existing `/api/jobs/<id>/download` and `/api/jobs/<id>/review`. The report and the hit list live in that same job's payload (`pattern_report`, `pattern_word_hits`, `pattern_summary`); the `jobs` table's payload is a whole JSON document already, so no schema change was needed. Downloaded filenames get `_已套用範本` and `_修改報告` appended so they never overwrite the original file; the report is UTF-8 txt with a BOM so even old versions of Notepad don't garble it.
 
-**Analysis report**: deliberately its own `kind="pattern_analysis"` record with its own status, rather than a field on the applied result — so when the server restarts, `mark_running_as_interrupted` marks a still-running analysis as interrupted and the frontend knows to offer a re-run instead of showing "analyzing" forever (known-issue-check item 14). Items go to the LLM 40 at a time, and partial results are saved after every batch; item numbers the LLM invents are dropped. When there are no word-level edits the LLM is never called, so the personal-project model restriction isn't checked either.
+**Analysis report**: deliberately its own `kind="pattern_analysis"` record with its own status, rather than a field on the applied result — so when the server restarts, `mark_stale_as_interrupted` marks an analysis nobody is running any more as interrupted and the frontend knows to offer a re-run instead of showing "analyzing" forever (known-issue-check item 14). Items go to the LLM 40 at a time, and partial results are saved after every batch; item numbers the LLM invents are dropped. When there are no word-level edits the LLM is never called, so the personal-project model restriction isn't checked either.
 
 **The matching change in Stage 3 proofreading**: converting half-width punctuation used to be part of proofreading's LLM "preprocessing"; 2.0 moves it into Stage 2 as plain code, so the LLM has one job fewer. But the prompt could not simply be edited: 1.x desktop apps have no Stage 2, so changing it on the backend would leave anyone who hasn't upgraded with no full-width conversion at all. `review/prompts.py` therefore keeps both versions and uses the no-conversion one only when the 2.0 frontend sends `skip_fullwidth_punct=true`; a request without the parameter gets a prompt identical, character for character, to the one before the change (a test compares them directly). When a user skips Stage 2 and goes straight to proofreading, punctuation is not converted to full-width — deliberately, since skipping Stage 2 usually means they don't want it converted.
 
@@ -481,7 +481,7 @@ validators/               output validation (e.g. leftover-Simplified-character 
 - `usage_log` (the Neon table) counts "how many times this tool called the API," not a live read of Google's/Anthropic's own billing systems — the two will diverge.
 - Stage 3 (proofreading)'s "apply" does batch-scoped local string replacement; if the same typo appears more than once within one batch, only the first occurrence gets replaced.
 - Stage 2's template rules always match within a single line, never across lines, and they don't know about word boundaries: a short rule can easily hit across words (e.g. "這只" also rewrites "這只是…"). This is exactly what the analysis report is meant to flag, and something to keep in mind when maintaining `pattern.txt`.
-- A locally-run backend connects to the same Neon database as Render, and either one marks every `pending`/`running` job in the DB as `interrupted` on startup (`db_utils/job_store.py` assumes a single instance). Before starting one locally, confirm nobody has a job running — see Setup Guide "Part A 5. Start It".
+- A locally-run backend connects to the same Neon database as Render, and after starting, either one marks `pending`/`running` jobs that aren't its own and have had no heartbeat for 90 seconds as `interrupted` (heartbeat-based since 2026-11-10; it used to mark every one of them on startup, which mis-marked live jobs whenever old and new instances overlapped during a deploy — see point 3 of the `db_utils/job_store.py` module docstring). A running instance refreshes its own jobs' heartbeat every 20 seconds, so they aren't mis-marked; still, confirm nobody has a job running before starting one locally — see Setup Guide "Part A 5. Start It".
 
 ---
 
@@ -533,7 +533,7 @@ that, manage everyone else from the admin UI.
 
 ### 5. Start It
 
-The local backend connects to the production Neon database and **marks every running job in the DB as `interrupted` the moment it starts** — if someone happens to have a job running on Render, its state gets changed. Before starting, confirm this returns `{"active": 0}`:
+The local backend connects to the production Neon database and, after starting, marks unfinished jobs with no heartbeat as `interrupted`. Jobs running on Render refresh their heartbeat every 20 seconds and shouldn't be mis-marked, but this is production data, so to be safe confirm this returns `{"active": 0}` before starting:
 
 ```bash
 curl https://zh-cn-to-tw-backend.onrender.com/api/jobs/active

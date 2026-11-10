@@ -25,6 +25,14 @@ _jobs = {}
 _KIND = "job"
 
 
+def _active_ids() -> list[str]:
+    with _lock:
+        return [k for k, v in _jobs.items() if v["status"] not in job_store.TERMINAL_STATUSES]
+
+
+job_store.register_active_source(_active_ids)
+
+
 def _persist(job_id: str, *, force: bool = True) -> None:
     with _lock:
         job = _jobs.get(job_id)
@@ -85,6 +93,8 @@ def set_status(job_id: str, status: str):
         job = _jobs.get(job_id)
         if job is None:
             return
+        if job["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         job["status"] = status
     _persist(job_id)
 
@@ -106,6 +116,8 @@ def set_result(job_id: str, text: str):
         job = _jobs.get(job_id)
         if job is None:
             return
+        if job["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         job["result_text"] = text
         job["status"] = "done"
     _persist(job_id)
@@ -128,6 +140,8 @@ def set_error(job_id: str, error: str):
         job = _jobs.get(job_id)
         if job is None:
             return
+        if job["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         job["error"] = error
         job["status"] = "failed"
     _persist(job_id)
@@ -136,22 +150,35 @@ def set_error(job_id: str, error: str):
 def finalize_with_partial(job_id: str) -> bool:
     """使用者在中斷對話窗選「結束此階段工作」時呼叫：把目前已經完成的
     部分成果當成最終結果收尾，讓他至少能把做到一半的東西下載出來。
-    回傳是否真的有東西可以收。"""
+    回傳是否真的有東西可以收。
+
+    只接受 interrupted：還在跑的工作被收尾的話，背景執行緒之後的
+    set_result/set_error 會把使用者已經下載的結果蓋掉（現在有
+    TERMINAL_STATUSES 守門，晚到的寫入會被丟掉，但那等於把一個還在跑、
+    已經付費的工作硬生生截斷）。同一個工作收尾過再按一次照樣回 True。"""
     job = get_job(job_id)
     if job is None:
+        return False
+    if job["status"] == "done" and job.get("finalized_from_partial"):
+        return True
+    if job["status"] != "interrupted":
         return False
     partial = job.get("partial_text") or job.get("result_text")
     if not partial:
         return False
 
     with _lock:
-        if job_id not in _jobs:
+        current = _jobs.get(job_id)
+        if current is None:
             # 重啟後記憶體是空的，把從資料庫撈回來的狀態放回記憶體，
             # 後續輪詢/下載才走得下去
-            _jobs[job_id] = job
-        _jobs[job_id]["result_text"] = partial
-        _jobs[job_id]["status"] = "done"
-        _jobs[job_id]["logs"].append({
+            _jobs[job_id] = current = job
+        elif current["status"] != "interrupted":
+            return current["status"] == "done" and bool(current.get("finalized_from_partial"))
+        current["result_text"] = partial
+        current["status"] = "done"
+        current["finalized_from_partial"] = True
+        current["logs"].append({
             "time": time.time(),
             "level": "warning",
             "message": "工作中途被伺服器重啟打斷，已改用中斷前完成的部分成果收尾",

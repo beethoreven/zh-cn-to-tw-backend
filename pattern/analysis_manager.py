@@ -2,8 +2,8 @@
 讀取路徑，Neon（jobs 表，kind="pattern_analysis"）是重啟後的復原路徑。
 
 刻意做成獨立的一筆紀錄、有自己的 status，而不是掛在套用結果那個 job
-上的一個欄位：這樣伺服器重啟時，db_utils/job_store.mark_running_as_interrupted
-會把還在跑的分析自動標成 interrupted，前端就知道要提示使用者重新分析，
+上的一個欄位：這樣伺服器重啟時，db_utils/job_store.mark_stale_as_interrupted
+會把沒人在跑的分析自動標成 interrupted，前端就知道要提示使用者重新分析，
 不會永遠停在「分析中」（見 known-issue-check 第 14 條）。
 
 寫入只會發生在同一個 process 的背景執行緒裡（建立後馬上開始跑），沒有
@@ -23,6 +23,14 @@ _lock = threading.Lock()
 _analyses: dict[str, dict] = {}
 
 _KIND = "pattern_analysis"
+
+
+def _active_ids() -> list[str]:
+    with _lock:
+        return [k for k, v in _analyses.items() if v["status"] not in job_store.TERMINAL_STATUSES]
+
+
+job_store.register_active_source(_active_ids)
 
 
 def _persist(analysis_id: str, *, force: bool = True) -> None:
@@ -77,6 +85,8 @@ def set_status(analysis_id: str, status: str) -> None:
         record = _analyses.get(analysis_id)
         if record is None:
             return
+        if record["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         record["status"] = status
     _persist(analysis_id)
 
@@ -96,6 +106,8 @@ def set_result(analysis_id: str, items: list[dict]) -> None:
         record = _analyses.get(analysis_id)
         if record is None:
             return
+        if record["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         record["items"] = list(items)
         record["status"] = "done"
     _persist(analysis_id)
@@ -106,6 +118,8 @@ def set_error(analysis_id: str, error: str) -> None:
         record = _analyses.get(analysis_id)
         if record is None:
             return
+        if record["status"] in job_store.TERMINAL_STATUSES:
+            return  # 已經結束的不能再被改（見 job_store.TERMINAL_STATUSES）
         record["error"] = error
         record["status"] = "failed"
     _persist(analysis_id)
