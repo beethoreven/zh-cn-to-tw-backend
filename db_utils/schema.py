@@ -269,8 +269,8 @@ def _ensure_app_versions(cur) -> None:
     # 這張表刻意不在這裡自動補種子資料。version_check API（見 app.py）
     # 對查無門檻資料的 (os, os_version) 組合本來就設計成一律不擋
     # （force_update: False），完全沒有資料不影響任何人；每個分流的
-    # 門檻要有意義的值時，直接手動 INSERT/UPDATE 這張表（見
-    # update_version skill），不要在這裡自動生。
+    # 門檻要有意義的值時，出版時直接手動 INSERT/UPDATE 這張表，不要在
+    # 這裡自動生。
     #
     # 這裡曾經有一段「查無 os_version='13+' 就自動種一筆預設值
     # (1.0, 1.0)」的邏輯，是最早從「每個 os 一列」升級成 (os,

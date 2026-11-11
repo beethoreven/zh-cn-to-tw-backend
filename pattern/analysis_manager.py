@@ -4,11 +4,13 @@
 刻意做成獨立的一筆紀錄、有自己的 status，而不是掛在套用結果那個 job
 上的一個欄位：這樣伺服器重啟時，db_utils/job_store.mark_stale_as_interrupted
 會把沒人在跑的分析自動標成 interrupted，前端就知道要提示使用者重新分析，
-不會永遠停在「分析中」（見 known-issue-check 第 14 條）。
+不會永遠停在「分析中」。只存在記憶體裡的工作狀態，重啟之後就沒有任何
+執行緒會再推進它，資料庫裡卻還寫著 running。
 
 寫入只會發生在同一個 process 的背景執行緒裡（建立後馬上開始跑），沒有
-「做完之後隔很久才寫」的情況，所以不需要 review_manager 那種 _rehydrate
-（見 known-issue-check 第 28 條）。
+「做完之後隔很久才寫」的情況，所以不需要 review_manager 那種 _rehydrate。
+那個是給「工作做完、使用者看了很久才按套用」這種寫入用的：中間如果重啟
+過，記憶體是空的，只查記憶體的寫入會找不到紀錄、默默什麼都不寫。
 """
 
 from __future__ import annotations
