@@ -96,31 +96,6 @@ def get_today_usage(model: str) -> int:
         conn.close()
 
 
-def get_today_project_model_count(project_id: int, model: str) -> int:
-    """回傳「今天」（UTC 午夜為界，跟 get_today_usage 同一套規則）某個
-    專案底下，這個 model 被呼叫過幾次——給「個人專案」的 Gemini 3.6
-    Flash 每日額度限制用，跟 get_today_usage 的差別只在多加了 project
-    這個過濾條件。"""
-    now_utc = datetime.now(_UTC)
-    start_utc_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_utc_dt = start_utc_dt + timedelta(days=1)
-    start_utc = start_utc_dt.isoformat()
-    end_utc = end_utc_dt.isoformat()
-
-    conn, cur = _get_conn()
-    try:
-        cur.execute(
-            _sql(
-                "SELECT COUNT(*) FROM usage_log "
-                "WHERE model = ? AND project = ? AND timestamp_utc >= ? AND timestamp_utc < ?"
-            ),
-            (model, project_id, start_utc, end_utc),
-        )
-        return cur.fetchone()[0]
-    finally:
-        conn.close()
-
-
 def get_project_token_usage(project_id: int, model: str) -> dict:
     """回傳某個劇本案（project id）累積至今、這個 model 的 input/output
     token 數，不分時間範圍——給主介面「本案使用 Claude token 狀況」用。"""

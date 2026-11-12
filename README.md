@@ -283,12 +283,8 @@ curl https://<你的部署網址>/api/jobs/active
 | `BATCH_DELAY_SECONDS` | `3` | 批次之間固定等幾秒，避免撞到每分鐘請求上限 |
 | `QUOTA_RETRY_BASE_DELAY_SECONDS` | `20` | 遇到 429 的退避基準秒數，第 N 次重試等 N 倍 |
 | `TRANSIENT_RETRY_BASE_DELAY_SECONDS` | `5` | 遇到 503／529 的退避基準秒數，第 N 次重試等 N 倍 |
-| `GEMINI_3_6_FLASH_RPD_LIMIT` | `20` | Gemini 3.6 Flash 每日呼叫次數上限 |
-| `GEMINI_3_7_FLASH_RPD_LIMIT` | `20` | Gemini 3.7 Flash 每日呼叫次數上限 |
-| `GEMINI_3_8_FLASH_RPD_LIMIT` | `20` | Gemini 3.8 Flash 每日呼叫次數上限 |
 | `GEMINI_3_5_FLASH_LITE_RPD_LIMIT` | `500` | Gemini 3.5 Flash Lite 每日呼叫次數上限 |
 | `GEMINI_3_1_FLASH_LITE_RPD_LIMIT` | `500` | Gemini 3.1 Flash Lite 每日呼叫次數上限 |
-| `PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT` | `6` | 個人專案底下，3.6／3.7／3.8 Flash 各自每天可以打幾次 |
 | `SESSION_IDLE_DAYS` | `90` | 登入 session 閒置幾天後失效 |
 | `AUTH_CACHE_TTL_SECONDS` | `30` | 權限查詢結果快取幾秒 |
 | `FLASK_DEBUG` | `false` | 本機除錯模式，正式環境不要開 |
@@ -623,12 +619,8 @@ Every other variable has a default (in `configs/config.py`, a few in their own m
 | `BATCH_DELAY_SECONDS` | `3` | Fixed pause between batches, to stay under the per-minute request limit |
 | `QUOTA_RETRY_BASE_DELAY_SECONDS` | `20` | Backoff base on 429; the Nth retry waits N times this |
 | `TRANSIENT_RETRY_BASE_DELAY_SECONDS` | `5` | Backoff base on 503/529; the Nth retry waits N times this |
-| `GEMINI_3_6_FLASH_RPD_LIMIT` | `20` | Daily call limit for Gemini 3.6 Flash |
-| `GEMINI_3_7_FLASH_RPD_LIMIT` | `20` | Daily call limit for Gemini 3.7 Flash |
-| `GEMINI_3_8_FLASH_RPD_LIMIT` | `20` | Daily call limit for Gemini 3.8 Flash |
 | `GEMINI_3_5_FLASH_LITE_RPD_LIMIT` | `500` | Daily call limit for Gemini 3.5 Flash Lite |
 | `GEMINI_3_1_FLASH_LITE_RPD_LIMIT` | `500` | Daily call limit for Gemini 3.1 Flash Lite |
-| `PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT` | `6` | Under the personal project, daily calls allowed for each of 3.6/3.7/3.8 Flash |
 | `SESSION_IDLE_DAYS` | `90` | Days of inactivity before a login session expires |
 | `AUTH_CACHE_TTL_SECONDS` | `30` | Seconds a permission lookup is cached |
 | `FLASK_DEBUG` | `false` | Local debug mode; do not enable in production |

@@ -101,9 +101,6 @@ WHOLE_BOOK_SENTINEL = "whole"
 
 # 各 model 每日呼叫次數上限，介面顯示「已用/上限」用；可用環境變數覆蓋
 RPD_LIMITS = {
-    "gemini-3.6-flash": int(os.environ.get("GEMINI_3_6_FLASH_RPD_LIMIT", "20")),
-    "gemini-3.7-flash": int(os.environ.get("GEMINI_3_7_FLASH_RPD_LIMIT", "20")),
-    "gemini-3.8-flash": int(os.environ.get("GEMINI_3_8_FLASH_RPD_LIMIT", "20")),
     "gemini-3.5-flash-lite": int(os.environ.get("GEMINI_3_5_FLASH_LITE_RPD_LIMIT", "500")),
     "gemini-3.1-flash-lite": int(os.environ.get("GEMINI_3_1_FLASH_LITE_RPD_LIMIT", "500")),
 }
@@ -118,37 +115,14 @@ RPD_LIMITS = {
 # 依賴的前提。
 PERSONAL_PROJECT_ID = 1
 
-# 個人專案底下，每個 Gemini Flash 模型每天各可以打幾次，比一般專案嚴格
-# 很多——這個專案沒有負責人可以追蹤是誰在用，Flash 系列每個模型的免費
-# 額度又只有每天 20 次，用這個低額度避免被拿來當白嫖/洗爆額度的後門。
-# 每個模型分開算（各自有獨立的 Google 額度），不是三個加總。特意不做成
-# DB 可調設定，就是不希望它跟一般的權限額度混在一起管理。
-PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT = int(
-    os.environ.get("PERSONAL_PROJECT_GEMINI_FLASH_DAILY_LIMIT", "6")
-)
-PERSONAL_PROJECT_LIMITED_MODELS = frozenset({"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"})
-
 # Gemini model 清單，附上要顯示在介面上的說明文字；也是 /api/usage
 # 每日呼叫次數（RPD）統計會遍歷的對象，只有 Gemini 有這種每日額度限制，
 # 所以這份清單刻意只保留 Gemini（Claude 是照 token 計費，不適用 RPD）
 AVAILABLE_MODELS = {
-    "gemini-3.6-flash": {
-        "label": "Gemini 3.6 Flash",
-        "description": "品質較佳、語意判斷較細緻，適合需要精準校對的場合；但每日額度較少。",
-    },
-    "gemini-3.7-flash": {
-        "label": "Gemini 3.7 Flash",
-        "description": "跟 3.6 Flash 同系列的新版，每日額度跟 3.6 Flash 分開計算；3.6 Flash 額度用完或忙碌時可以改用。",
-    },
-    "gemini-3.8-flash": {
-        "label": "Gemini 3.8 Flash",
-        "description": "Flash 系列目前最新的版本，每日額度跟其他 Flash 分開計算；3.6／3.7 Flash 額度用完或忙碌時可以改用。",
-    },
     "gemini-3.5-flash-lite": {
         "label": "Gemini 3.5 Flash Lite",
         "description": (
-            "速度快、額度較高，適合大量／整本處理；但語意判斷較粗略，"
-            "細節校對可能不如 Flash 系列精準。"
+            "速度快、每日額度較高，適合大量／整本處理。"
         ),
     },
     "gemini-3.1-flash-lite": {
@@ -211,3 +185,14 @@ ALL_MODELS = {
         ),
     },
 }
+
+# 預設 model 可以用環境變數覆蓋；如果設定的值已經不在清單裡（例如部署
+# 環境還留著已經下架的 model 名稱），沒指定 model 的呼叫會直接失敗。退回
+# 程式內建的預設值並印出警告，不讓一個過時的環境變數讓整個 Stage 無法使用。
+_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+if GEMINI_MODEL not in ALL_MODELS:
+    print(f"[config] GEMINI_MODEL={GEMINI_MODEL!r} 不在可用清單裡，改用 {_FALLBACK_MODEL}", flush=True)
+    GEMINI_MODEL = _FALLBACK_MODEL
+if DEFAULT_REVIEW_MODEL not in ALL_MODELS:
+    print(f"[config] DEFAULT_REVIEW_MODEL={DEFAULT_REVIEW_MODEL!r} 不在可用清單裡，改用 {_FALLBACK_MODEL}", flush=True)
+    DEFAULT_REVIEW_MODEL = _FALLBACK_MODEL
