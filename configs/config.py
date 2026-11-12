@@ -185,14 +185,3 @@ ALL_MODELS = {
         ),
     },
 }
-
-# 預設 model 可以用環境變數覆蓋；如果設定的值已經不在清單裡（例如部署
-# 環境還留著已經下架的 model 名稱），沒指定 model 的呼叫會直接失敗。退回
-# 程式內建的預設值並印出警告，不讓一個過時的環境變數讓整個 Stage 無法使用。
-_FALLBACK_MODEL = "gemini-3.5-flash-lite"
-if GEMINI_MODEL not in ALL_MODELS:
-    print(f"[config] GEMINI_MODEL={GEMINI_MODEL!r} 不在可用清單裡，改用 {_FALLBACK_MODEL}", flush=True)
-    GEMINI_MODEL = _FALLBACK_MODEL
-if DEFAULT_REVIEW_MODEL not in ALL_MODELS:
-    print(f"[config] DEFAULT_REVIEW_MODEL={DEFAULT_REVIEW_MODEL!r} 不在可用清單裡，改用 {_FALLBACK_MODEL}", flush=True)
-    DEFAULT_REVIEW_MODEL = _FALLBACK_MODEL
