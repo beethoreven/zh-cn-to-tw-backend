@@ -116,6 +116,14 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 **Stage 3 校對的配套修改**：半形轉全形原本是校對「前置處理」叫 LLM 做的，2.0 改成在 Stage 2 用程式做掉，LLM 少一件事。但 prompt 不能直接改：1.x 的桌面版沒有 Stage 2，後端一改，還沒升級的人校對時就沒人轉全形了。所以 `review/prompts.py` 保留兩個版本，只有 2.0 前端帶 `skip_fullwidth_punct=true` 時才用不轉全形的那個；沒帶參數的請求拿到的 prompt 跟改版前逐字相同（有測試直接比對過）。使用者跳過 Stage 2 直接校對時，標點就不會被轉成全形——這是刻意的，跳過 Stage 2 通常就是不想轉。
 
+### 登入：Google ID Token 只換一次 session，並比對 nonce
+
+`POST /auth/login` 是唯一收 Google ID Token 的地方：驗證簽章、效期、audience 之後換發應用程式自己的 session token，之後的 API 一律帶 session token（Google 的 token 只活約一小時，拿來當長效憑證，長時間的工作會在中途被登出，見 `auth_utils/sessions.py`）。
+
+換發之前另外比對 nonce，確認這個 token 是送來的這個 App 自己登入拿到的。桌面殼每次登入產生一個隨機原值，只留在 App 裡；Google 登入網址帶的是原值的 SHA-256（base64url、不帶 `=`），Google 把它原樣放進 ID Token 的 `nonce` 欄位；登入成功後，網頁把 token 跟原值一起送來，後端算一次雜湊比對（`auth_utils/auth.py` 的 `nonce_is_acceptable`）。token 會經過系統瀏覽器跟本機的登入回呼，原值不會，所以只拿到 token 的人換不到 session。刻意不直接比對 token 裡的 nonce：那個值寫在 token 裡、誰都讀得到，照抄送來就能通過，等於沒有檢查。
+
+舊版用戶端沒有原值。沒送原值的請求只放行兩種 token：nonce 是舊版桌面殼的格式（16 bytes 的十六進位，32 個字元；桌面版登入從一開始就是這個格式），或完全沒有 nonce（瀏覽器版的 Google Identity Services 沒有帶）。新版桌面殼的 nonce 是 43 個字元的雜湊，兩種格式分得出來，所以新版拿到的 token 一定要附原值。等強制更新把舊版都擋掉之後，就可以改成一律要原值（瀏覽器版到時也要先補上 nonce）。這個改動不需要後端先上線：舊後端不認得 `nonce` 欄位，直接略過，新版桌面殼照樣能登入。
+
 ### 檔案結構
 
 ```
@@ -297,6 +305,12 @@ curl https://<你的部署網址>/api/jobs/active
 帶 `Authorization: Bearer <session token>`；`/admin/*` 另外要求角色是
 管理員。
 
+### 登入
+
+- `POST /auth/login` — body `{"id_token": "<Google ID Token>", "nonce": "<原值>"}`，換發 session token。`nonce` 只有新版桌面殼會帶，舊版不帶也能登入（見專案報告「登入」一節）。
+- `POST /auth/logout` — 刪掉這個 session token。
+- `GET /auth/status` — 查 session 是否有效、帳號是否獲授權、是不是管理員。
+
 ### 版本檢查
 
 - `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — 前端在開始每個 Stage 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 11 以上一包、10.15 改用 Vision framework 做 OCR 另一包各自一包），省略時預設 `11+`
@@ -448,6 +462,14 @@ This feature grew out of a real manual workflow: applying a "before → after" l
 **Analysis report**: deliberately its own `kind="pattern_analysis"` record with its own status, rather than a field on the applied result — so when the server restarts, `mark_stale_as_interrupted` marks an analysis nobody is running any more as interrupted and the frontend knows to offer a re-run instead of showing "analyzing" forever (work state that lives only in memory has no thread left to advance it after a restart). Items go to the LLM 40 at a time, and partial results are saved after every batch; item numbers the LLM invents are dropped. When there are no word-level edits the LLM is never called, so the personal-project model restriction isn't checked either.
 
 **The matching change in Stage 3 proofreading**: converting half-width punctuation used to be part of proofreading's LLM "preprocessing"; 2.0 moves it into Stage 2 as plain code, so the LLM has one job fewer. But the prompt could not simply be edited: 1.x desktop apps have no Stage 2, so changing it on the backend would leave anyone who hasn't upgraded with no full-width conversion at all. `review/prompts.py` therefore keeps both versions and uses the no-conversion one only when the 2.0 frontend sends `skip_fullwidth_punct=true`; a request without the parameter gets a prompt identical, character for character, to the one before the change (a test compares them directly). When a user skips Stage 2 and goes straight to proofreading, punctuation is not converted to full-width — deliberately, since skipping Stage 2 usually means they don't want it converted.
+
+### Sign-In: a Google ID Token Is Exchanged for a Session Once, and Its Nonce Is Checked
+
+`POST /auth/login` is the only place that accepts a Google ID Token: after verifying the signature, expiry and audience, it issues the application's own session token, and every later API call carries that instead (Google's token only lives about an hour; used as a long-lived credential, long jobs would be signed out halfway through — see `auth_utils/sessions.py`).
+
+Before issuing a session it also checks the nonce, to confirm the token was obtained by this app's own sign-in. Each time the desktop shell signs in, it generates a random raw value that stays inside the app; the Google sign-in URL carries the raw value's SHA-256 (base64url, no `=`), which Google copies verbatim into the ID Token's `nonce` claim; after sign-in, the page sends the token together with the raw value, and the backend hashes and compares (`nonce_is_acceptable` in `auth_utils/auth.py`). The token passes through the system browser and the local sign-in callback, but the raw value does not, so someone who only obtains the token cannot exchange it for a session. Comparing the token's nonce directly was deliberately not done: that value is inside the token, readable by anyone, so copying it into the request would always pass — no check at all.
+
+Older clients have no raw value. A request without one is accepted only for two kinds of token: a nonce in the older desktop shells' format (16 bytes as hex, 32 characters; desktop sign-in has used this format from the start), or no nonce at all (the browser version's Google Identity Services doesn't send one). The new desktop shells' nonce is a 43-character hash, so the formats are distinguishable, and a token obtained by the new version must come with its raw value. Once forced updates have retired the old versions, the raw value can be made mandatory (the browser version would need to add a nonce first). This change doesn't require the backend to go live first: an old backend doesn't know the `nonce` field and simply ignores it, so the new desktop shells can still sign in.
 
 ### File Layout
 
@@ -633,6 +655,12 @@ Aside from `GET /api/health` (keep-alive, public), `GET /auth/status`
 `GET /api/version_check` (forced-update check, public), every endpoint
 requires `Authorization: Bearer <session token>`; `/admin/*` further
 requires the admin role.
+
+### Sign-In
+
+- `POST /auth/login` — body `{"id_token": "<Google ID Token>", "nonce": "<raw value>"}`; issues a session token. Only new desktop shells send `nonce`; older ones can still sign in without it (see the Project Report's "Sign-In" section).
+- `POST /auth/logout` — deletes this session token.
+- `GET /auth/status` — whether the session is valid, whether the account is authorized, and whether it's an admin.
 
 ### Version Check
 
