@@ -17,9 +17,9 @@ import anthropic
 
 from configs import config
 from llm_utils.errors import OutputTruncatedError, TransientAPIError
-from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_prompt
+from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_system_prompt
 from pattern.prompts import PATTERN_ANALYSIS_PROMPT
-from review.prompts import select_review_prompt
+from review.prompts import empty_review_response, select_review_prompt
 from usage.usage_log import record_usage
 
 _client = None
@@ -38,12 +38,15 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def _generate(
-    prompt: str,
+    system: str,
+    content: str,
     model: str | None,
     user_email: str | None,
     file_name: str | None = None,
     project: int | None = None,
 ) -> str:
+    """system 是我們的指示，content 是要處理的資料（劇本文字或項目清單），
+    兩者分開送，理由見 llm_utils/prompts.py 開頭的說明。"""
     client = _get_client()
     model_name = model or "claude-haiku-4-5-20251001"
 
@@ -51,7 +54,8 @@ def _generate(
         response = client.messages.create(
             model=model_name,
             max_tokens=config.CLAUDE_MAX_OUTPUT_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
+            system=system,
+            messages=[{"role": "user", "content": content}],
         )
     except (anthropic.OverloadedError, anthropic.InternalServerError) as exc:
         # 對方伺服器暫時性的問題（529 overloaded_error 最常見，代表 Claude
@@ -88,8 +92,12 @@ def refine_text(
 ) -> str:
     """items 是這次要套用的潤飾項目（見 llm_utils/prompts.py），由
     orchestrator 依「進行前置處理」「進行LLM潤飾」兩個開關算出來。"""
-    prompt = build_refine_prompt(text, items or ALL_REFINE_ITEMS)
-    return _generate(prompt, model, user_email, file_name=file_name, project=project)
+    if not text.strip():
+        # 沒有內容可以處理（例如整批都是空白頁）。內文單獨放在 user 訊息，
+        # Claude 會拒絕只有空白的內容，也沒有理由為空白付一次呼叫
+        return text
+    system = build_refine_system_prompt(items or ALL_REFINE_ITEMS)
+    return _generate(system, text, model, user_email, file_name=file_name, project=project)
 
 
 def review_text(
@@ -106,8 +114,10 @@ def review_text(
     enable_preprocess=False 時輸出是 JSON 陣列（校對建議）；True 時輸出是
     JSON 物件（前置處理後的文字 + 校對建議），見 review/prompts.py。
     skip_fullwidth_punct 是 2.0 前端帶的「前置處理不轉全形」。"""
-    prompt = select_review_prompt(enable_preprocess, skip_fullwidth_punct).format(text=text)
-    return _generate(prompt, model, user_email, file_name=file_name, project=project)
+    if not text.strip():
+        return empty_review_response(text, enable_preprocess)
+    system = select_review_prompt(enable_preprocess, skip_fullwidth_punct)
+    return _generate(system, text, model, user_email, file_name=file_name, project=project)
 
 
 def analyze_pattern(
@@ -119,5 +129,6 @@ def analyze_pattern(
 ) -> str:
     """Stage 2 分析報告：回傳 Claude 原始輸出（JSON 陣列），由
     pattern/analyzer.py 解析。"""
-    prompt = PATTERN_ANALYSIS_PROMPT.format(items=items_text)
-    return _generate(prompt, model, user_email, file_name=file_name, project=project)
+    if not items_text.strip():
+        return "[]"
+    return _generate(PATTERN_ANALYSIS_PROMPT, items_text, model, user_email, file_name=file_name, project=project)

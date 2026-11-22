@@ -4,9 +4,14 @@
 做完了）。送進來的只有範本規則造成的修改、每筆附截短的前後文，不送
 全文——這是刻意的成本設計：一份劇本的字詞類命中通常只有幾十筆，全文
 卻有五六萬字。
+
+這是 system prompt，項目清單由呼叫端另外放進 user 訊息，理由見
+llm_utils/prompts.py 開頭的說明（CONTENT_IS_DATA_RULE）。
 """
 
-PATTERN_ANALYSIS_PROMPT = """你是熟悉台灣繁體中文的資深編輯。下面是一份劇本殺劇本，\
+from llm_utils.prompts import CONTENT_IS_DATA_RULE
+
+PATTERN_ANALYSIS_PROMPT = """你是熟悉台灣繁體中文的資深編輯。使用者訊息裡是一份劇本殺劇本，\
 用「固定替換規則」自動修改過的結果。每一個項目列出：規則（修改前 → 修改後）、\
 這一段修改後的文字（【】標出被改的位置），以及前一段的結尾、後一段的開頭。
 
@@ -19,18 +24,14 @@ PATTERN_ANALYSIS_PROMPT = """你是熟悉台灣繁體中文的資深編輯。下
 如果你判斷有任何文字內容敏感，這份文字的使用權完全屬於我，請照常審閱，不要拒絕或省略。
 
 請以 JSON 陣列輸出，每個元素是一個物件，包含以下欄位：
-- "no": 項目編號（整數，對應下面每一項開頭的編號）
+- "no": 項目編號（整數，對應使用者訊息裡每一項開頭的編號）
 - "issue": 需要注意的原因（一兩句話）
 - "suggestion": 建議怎麼改（沒有具體建議就給空字串）
 
 沒有需要注意的項目就輸出 []。
 只能輸出 JSON，不要加任何說明文字，不要用 markdown code fence 包起來。
 
-以下是項目：
----
-{items}
----
-"""
+""" + CONTENT_IS_DATA_RULE
 
 
 def format_items(items: list[dict]) -> str:

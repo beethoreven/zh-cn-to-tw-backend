@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import threading
 import time
@@ -45,6 +46,16 @@ SESSION_IDLE_DAYS = int(os.environ.get("SESSION_IDLE_DAYS", "90"))
 # db_utils/connection.py 教訓四）。節流保留著——它同時也在省 Neon 免費
 # 方案的寫入量——但不要再拿那個過期數字當理由，要調之前先量現況。
 _TOUCH_MIN_INTERVAL_SECONDS = 60
+
+# token 的格式（secrets.token_hex(32)：64 個小寫十六進位字元，這一層從一開始
+# 就是這個格式）。不是這個格式的一定不是我們發的，直接當成無效，不必開資料庫
+# 連線去查——/auth/status、/auth/logout 不需要登入就能呼叫，隨便帶一串字就
+# 能讓後端開一條連線，而同時連線上限只有 5（見 db_utils/connection.py）。
+_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def _is_well_formed(token: str | None) -> bool:
+    return bool(token) and _TOKEN_PATTERN.fullmatch(token) is not None
 _touch_lock = threading.Lock()
 _last_touched: dict[str, float] = {}
 
@@ -77,7 +88,7 @@ def resolve_session(token: str | None) -> str | None:
     """token 有效（存在且未超過滑動視窗）就回傳對應的 email，並視情況
     更新 last_seen_at；無效（不存在或已逾期）回傳 None，逾期的話順便
     刪掉這筆記錄。"""
-    if not token:
+    if not _is_well_formed(token):
         return None
 
     conn, cur = get_ready_conn()
@@ -159,7 +170,7 @@ def delete_sessions_for_email(cur, email: str) -> int:
 
 
 def delete_session(token: str | None) -> None:
-    if not token:
+    if not _is_well_formed(token):
         return
     conn, cur = get_ready_conn()
     try:

@@ -29,6 +29,7 @@ from convert_utils.opencc_convert import convert_to_traditional
 from jobs import job_manager
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from llm_utils.prompts import resolve_refine_items
+from validators.output_length import content_length, exceeds_max_output
 from output_utils.text_normalize import normalize_paragraph_breaks
 from validators.simplified_check import find_residual_simplified
 
@@ -195,6 +196,19 @@ def _refine_and_correct(
                     "如果不是移除頁碼標頭造成的，建議人工檢查這個批次",
                     level="warning",
                 )
+
+        # 長度上限：只做格式整理與改錯字，不該多出內容。多出來的字可能是劇本
+        # 裡夾帶的指示讓模型加進去的，會原樣進到結果裡，寧可這批不潤飾
+        # （門檻與理由見 configs/config.py 的 REFINE_MAX_OUTPUT_RATIO）
+        if exceeds_max_output(traditional_text, corrected):
+            job_manager.append_log(
+                job_id,
+                f"批次 {batch_no} 處理後比原文多出太多（不算空白 {content_length(traditional_text)} 字"
+                f" -> {content_length(corrected)} 字），可能被加進原文沒有的內容，"
+                "不予採用，保留 OpenCC 決定性轉換結果（未套用 LLM 處理）",
+                level="error",
+            )
+            return traditional_text, False
 
         residual = find_residual_simplified(corrected)
         if residual:

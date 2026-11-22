@@ -84,6 +84,17 @@ REFINE_MAX_RETRY = int(os.environ.get("REFINE_MAX_RETRY", "3"))
 REFINE_MIN_OUTPUT_RATIO = float(os.environ.get("REFINE_MIN_OUTPUT_RATIO", "0.7"))
 REFINE_WARN_OUTPUT_RATIO = float(os.environ.get("REFINE_WARN_OUTPUT_RATIO", "0.9"))
 
+# 長度上限：LLM 處理後的文字超過原文的這個比例，就不採用、退回原文。Stage 1
+# 潤飾與 Stage 3 的前置處理都只做格式整理和改錯字，不該多出內容；劇本本身是
+# 第三方提供的，裡面可能夾帶要模型改寫或插入文字的指示，多出來的字會原樣進到
+# 結果裡，這一層把它擋下來。
+#
+# 比的是「不算空白的字數」：合併或拆開換行只會改變空白，不是內容。SLACK 是
+# 固定的寬限字數，給很短的批次用——一頁只有幾個字時，補上一對漏掉的引號就
+# 可能超過一成，那不是異常。
+REFINE_MAX_OUTPUT_RATIO = float(os.environ.get("REFINE_MAX_OUTPUT_RATIO", "1.1"))
+REFINE_MAX_OUTPUT_SLACK_CHARS = int(os.environ.get("REFINE_MAX_OUTPUT_SLACK_CHARS", "20"))
+
 # PDF 轉圖片時的解析度。backend 本身不轉圖（OCR 一律在使用者本機做），
 # 這組值只透過 /api/options 提供給前端的 DPI 欄位當預設值與上下限。
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
@@ -185,3 +196,27 @@ ALL_MODELS = {
         ),
     },
 }
+
+# --- 請求大小與頻率的上限（見 request_limits/） ---
+#
+# 請求大小：JSON 請求整個讀進記憶體才解析，Render 免費方案只有 512 MB，
+# 上限要壓低；Stage 1 送的是整本書 OCR 出來的文字，幾千頁的中文也只有十幾
+# MB，16 MB 綽綽有餘。直接上傳的 .docx 可能夾帶很多圖片，上限放寬，而且
+# 檔案超過 500 KB 時 Werkzeug 會先寫到暫存檔，不佔記憶體。
+MAX_JSON_BODY_MB = int(os.environ.get("MAX_JSON_BODY_MB", "16"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "64"))
+
+# 頻率：只擋洪水式的濫用，正常使用碰不到。前端輪詢進度每 4～5 秒一次，
+# 同時跑兩個階段每分鐘也不到 30 個請求。
+# - 每個 IP 每分鐘的請求總數（同一個網路出口的人共用這個額度）。
+# - /auth/login 另外再壓一層：一個人一次登入只打一次。
+# - 會呼叫 LLM（要花錢）的請求，每個 session 每 10 分鐘的次數。
+RATE_LIMIT_PER_IP_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_IP_PER_MINUTE", "600"))
+RATE_LIMIT_LOGIN_PER_IP_PER_MINUTE = int(os.environ.get("RATE_LIMIT_LOGIN_PER_IP_PER_MINUTE", "20"))
+RATE_LIMIT_LLM_PER_SESSION_PER_10_MINUTES = int(
+    os.environ.get("RATE_LIMIT_LLM_PER_SESSION_PER_10_MINUTES", "30")
+)
+
+# 強制更新門檻（app_versions）在記憶體快取多久。版本檢查不需要登入，快取
+# 讓它不必每次都開資料庫連線；改了門檻最晚這麼久之後生效。
+APP_VERSIONS_CACHE_SECONDS = int(os.environ.get("APP_VERSIONS_CACHE_SECONDS", "60"))

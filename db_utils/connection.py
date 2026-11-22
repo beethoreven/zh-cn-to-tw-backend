@@ -231,6 +231,12 @@ def get_ready_conn():
     from db_utils.schema import ensure_schema  # 延遲 import，避免循環引用
 
     conn, cur = get_conn()
-    ensure_schema(cur)
-    conn.commit()
+    try:
+        ensure_schema(cur)
+        conn.commit()
+    except Exception:
+        # 失敗也要關掉連線，名額才會還回去；不關的話每失敗一次就少一個
+        # 名額，幾次之後所有請求都會卡在等名額
+        conn.close()
+        raise
     return conn, cur

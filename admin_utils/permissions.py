@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from db_utils.connection import get_ready_conn, sql
+from db_utils.schema import ADMIN_ROLE_ID
 
 
 def list_permissions(exclude_admin: bool = True) -> list[dict]:
-    """列出角色/額度。exclude_admin=True 時排除 id=1(管理員)，給「選擇
-    權限」下拉選單用——管理員這個角色的額度不透過這個頁籤調整。"""
+    """列出角色/額度。exclude_admin=True 時排除管理員（ADMIN_ROLE_ID），給
+    「選擇權限」下拉選單用——管理員這個角色的額度不透過這個頁籤調整。"""
     conn, cur = get_ready_conn()
     try:
         if exclude_admin:
             cur.execute(
-                "SELECT id, role, allowed_haiku FROM permissions "
-                "WHERE id != 1 ORDER BY id"
+                sql("SELECT id, role, allowed_haiku FROM permissions WHERE id != ? ORDER BY id"),
+                (ADMIN_ROLE_ID,),
             )
         else:
             cur.execute("SELECT id, role, allowed_haiku FROM permissions ORDER BY id")

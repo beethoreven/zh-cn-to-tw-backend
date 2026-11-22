@@ -229,17 +229,3 @@ def delete_expired() -> int:
             conn.close()
     except Exception:  # noqa: BLE001
         return 0
-
-
-def count_active() -> int:
-    """目前有幾個工作正在跑。給「部署前先確認沒有工作在進行」用
-    （見 /api/jobs/active）。"""
-    try:
-        conn, cur = get_ready_conn()
-        try:
-            cur.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'running')")
-            return cur.fetchone()[0]
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
-        return 0

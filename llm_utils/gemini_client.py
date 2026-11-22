@@ -14,9 +14,9 @@ from google.genai import types
 from configs import config
 from llm_utils.call_timeout import call_with_timeout
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
-from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_prompt
+from llm_utils.prompts import ALL_REFINE_ITEMS, build_refine_system_prompt
 from pattern.prompts import PATTERN_ANALYSIS_PROMPT
-from review.prompts import select_review_prompt
+from review.prompts import empty_review_response, select_review_prompt
 from usage.usage_log import record_usage
 
 _client = None
@@ -35,26 +35,32 @@ def _get_client() -> genai.Client:
 
 
 def _generate(
-    prompt: str,
+    system_instruction: str,
+    content: str,
     model: str | None,
     user_email: str | None,
     response_mime_type: str | None = None,
     file_name: str | None = None,
     project: int | None = None,
 ) -> str:
+    """system_instruction 是我們的指示，content 是要處理的資料（劇本文字或
+    項目清單），兩者分開送，理由見 llm_utils/prompts.py 開頭的說明。"""
     client = _get_client()
     model_name = model or config.GEMINI_MODEL
 
     # 不論這次呼叫最後成功或失敗，都算「打了一次」，記錄下來當用量參考
     record_usage(model_name, user_email=user_email, file_name=file_name, project=project)
 
-    gen_config = types.GenerateContentConfig(response_mime_type=response_mime_type) if response_mime_type else None
+    gen_config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type=response_mime_type,
+    )
     try:
         response = call_with_timeout(
             config.LLM_CALL_TIMEOUT_SECONDS,
             client.models.generate_content,
             model=model_name,
-            contents=prompt,
+            contents=content,
             config=gen_config,
         )
     except genai_errors.APIError as exc:
@@ -110,8 +116,12 @@ def refine_text(
 ) -> str:
     """items 是這次要套用的潤飾項目（見 llm_utils/prompts.py），由
     orchestrator 依「進行前置處理」「進行LLM潤飾」兩個開關算出來。"""
-    prompt = build_refine_prompt(text, items or ALL_REFINE_ITEMS)
-    return _generate(prompt, model, user_email, file_name=file_name, project=project)
+    if not text.strip():
+        # 沒有內容可以處理（例如整批都是空白頁）。內文單獨放在 user 訊息，
+        # 空的會被 API 拒絕，也沒有理由為空白付一次呼叫
+        return text
+    system_instruction = build_refine_system_prompt(items or ALL_REFINE_ITEMS)
+    return _generate(system_instruction, text, model, user_email, file_name=file_name, project=project)
 
 
 def review_text(
@@ -128,9 +138,17 @@ def review_text(
     enable_preprocess=False 時輸出是 JSON 陣列（校對建議）；True 時輸出是
     JSON 物件（前置處理後的文字 + 校對建議），見 review/prompts.py。
     skip_fullwidth_punct 是 2.0 前端帶的「前置處理不轉全形」。"""
-    prompt = select_review_prompt(enable_preprocess, skip_fullwidth_punct).format(text=text)
+    if not text.strip():
+        return empty_review_response(text, enable_preprocess)
+    system_instruction = select_review_prompt(enable_preprocess, skip_fullwidth_punct)
     return _generate(
-        prompt, model, user_email, response_mime_type="application/json", file_name=file_name, project=project
+        system_instruction,
+        text,
+        model,
+        user_email,
+        response_mime_type="application/json",
+        file_name=file_name,
+        project=project,
     )
 
 
@@ -144,7 +162,14 @@ def analyze_pattern(
     """Stage 2 分析報告：回傳 LLM 原始輸出（JSON 陣列），由
     pattern/analyzer.py 解析。items_text 是 pattern/prompts.format_items
     排好的項目清單。"""
-    prompt = PATTERN_ANALYSIS_PROMPT.format(items=items_text)
+    if not items_text.strip():
+        return "[]"
     return _generate(
-        prompt, model, user_email, response_mime_type="application/json", file_name=file_name, project=project
+        PATTERN_ANALYSIS_PROMPT,
+        items_text,
+        model,
+        user_email,
+        response_mime_type="application/json",
+        file_name=file_name,
+        project=project,
     )

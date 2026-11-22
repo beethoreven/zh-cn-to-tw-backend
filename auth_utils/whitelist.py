@@ -30,25 +30,35 @@ import threading
 import time
 
 from db_utils.connection import get_ready_conn, sql
+from db_utils.schema import ADMIN_ROLE_ID
 
 _CACHE_TTL_SECONDS = int(os.environ.get("AUTH_CACHE_TTL_SECONDS", "30"))
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, dict | None]] = {}
+# invalidate_cache 每呼叫一次就加一。查資料庫之前先記下當時的值，查完要
+# 寫回快取時如果已經變了，代表查詢期間有人清過快取（例如管理員剛停用
+# 帳號），這次查到的可能是改動之前的資料，不能寫回去
+_generation = 0
+
+
+def normalize_email(email: str) -> str:
+    """email 一律去掉前後空白、轉小寫再存或比對。
+
+    Google 帳號的 email 不分大小寫，但管理員在後台輸入時打的大小寫、Google
+    回傳的 email claim 不保證一致。只要有一個地方用原樣比對，就會出現
+    「後台看起來有加進去，卻登入不了」或「停用了卻沒撤銷到 session」這種
+    錯。users 表從這一版起一律存小寫，唯一限制也改成不分大小寫（見
+    db_utils/schema.py 的 _ensure_users）。"""
+    return email.strip().lower()
 
 
 def _query_user_auth_row(email: str):
     conn, cur = get_ready_conn()
     try:
-        # 用 LOWER() 比對，不要求大小寫完全一致——管理員在後台輸入
-        # email 時打的大小寫，不一定跟 Google 這個帳號實際回傳的
-        # email claim 完全一樣，大小寫對不上會讓使用者莫名其妙被
-        # 擋在授權白名單外面，而且從後台看起來像是有把人加進去了
+        # 仍然用 LOWER() 比對：小寫化之前就存在的資料，在遷移完成前可能
+        # 還有大寫（見 db_utils/schema.py 的 _ensure_users）
         cur.execute(
-            sql(
-                "SELECT users.status, permissions.role FROM users "
-                "JOIN permissions ON users.role = permissions.id "
-                "WHERE LOWER(users.email) = LOWER(?)"
-            ),
+            sql("SELECT status, role FROM users WHERE LOWER(email) = LOWER(?)"),
             (email,),
         )
         return cur.fetchone()
@@ -61,22 +71,32 @@ def get_user_auth_info(email: str | None) -> dict | None:
     不在 users 表裡；否則回傳 {"active": bool, "is_admin": bool}。"""
     if not email:
         return None
+    # 快取的鍵也要小寫：停用帳號時 invalidate_cache 拿的是後台存的 email，
+    # 登入時查的是 Google 給的 email，大小寫不同就清不到這一筆
+    email = normalize_email(email)
 
     now = time.time()
     with _cache_lock:
         cached = _cache.get(email)
         if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
             return cached[1]
+        generation = _generation
 
     row = _query_user_auth_row(email)
     if row is None:
         result = None
     else:
-        status, role = row
-        result = {"active": status == "active", "is_admin": role == "admin"}
+        status, role_id = row
+        # 看固定的角色 id，不看角色名稱：名稱可以在管理介面的「權限管理」
+        # 改，把任何一個角色改名成 admin，就會讓那個角色的所有人都變成
+        # 管理員
+        result = {"active": status == "active", "is_admin": role_id == ADMIN_ROLE_ID}
 
     with _cache_lock:
-        _cache[email] = (now, result)
+        # 查詢期間快取被清過：結果照樣回給這一個請求（它在改動之前就開始
+        # 了），但不寫回快取，否則停用要等 TTL 過期才生效
+        if _generation == generation:
+            _cache[email] = (now, result)
     return result
 
 
@@ -92,11 +112,17 @@ def invalidate_cache(email: str | None) -> None:
     `python3 app.py`，Flask 內建伺服器 threaded=True），所以清一次就
     夠了；哪天改成多 worker（gunicorn 之類），每個 process 各有一份
     快取，這裡就只清得掉自己那一份，屆時要改成走共用儲存或縮短 TTL。
+
+    一定要在資料庫的改動 commit 之後才呼叫：先清的話，commit 之前進來的
+    請求會查到改動前的資料、重新寫回快取。正在查詢中、結果還沒寫回的
+    請求，由 get_user_auth_info 的 _generation 比對擋下。
     """
+    global _generation
     if not email:
         return
     with _cache_lock:
-        _cache.pop(email, None)
+        _generation += 1
+        _cache.pop(normalize_email(email), None)
 
 
 def is_permitted_user(email: str | None) -> bool:

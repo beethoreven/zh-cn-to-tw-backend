@@ -16,6 +16,7 @@ import time
 from configs import config
 from llm_utils.errors import OutputTruncatedError, QuotaExceededError, TransientAPIError
 from review import review_manager
+from validators.output_length import content_length, exceeds_max_output
 
 
 # 前置處理後把各批接回一份完整文字時用的分隔符。跟 _chunk_text 的切批
@@ -134,6 +135,14 @@ def _parse_preprocess_response(raw: str, original: str) -> tuple[str, list[dict]
         raise ValueError(
             f"前置處理後的文字只剩原文的 {len(processed) / original_len:.0%}"
             f"（{original_len} 字 -> {len(processed)} 字），像是被摘要或截斷了，不予採用"
+        )
+    # 上限跟 Stage 1 潤飾同一個門檻（configs/config.py 的
+    # REFINE_MAX_OUTPUT_RATIO）：前置處理只整理格式，多出來的字可能是劇本
+    # 裡夾帶的指示讓模型加進去的，而這段文字不經使用者勾選就直接取代原文
+    if exceeds_max_output(original, processed):
+        raise ValueError(
+            f"前置處理後的文字比原文多出太多（不算空白 {content_length(original)} 字"
+            f" -> {content_length(processed)} 字），可能被加進原文沒有的內容，不予採用"
         )
 
     return processed, _coerce_findings(data.get("findings", []))

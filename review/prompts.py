@@ -24,6 +24,9 @@ _parse_review_settings），沒帶的一律維持 1.x 的行為。
 ``review/reviewer.py``），findings 裡的 ``original``/``context`` 必須引用
 整理後的文字，不能引用整理前的原文，否則套用時會對不上。
 
+三個版本都只是 system prompt，要校對的文字由呼叫端另外放進 user 訊息，
+理由見 llm_utils/prompts.py 開頭的說明（CONTENT_IS_DATA_RULE）。
+
 之所以擠在同一次呼叫、而不是「先重寫一次、再校對一次」兩趟，是為了讓
 LLM 呼叫次數跟原本完全一樣，不因為多開一個選項就變成兩倍成本。代價是
 輸出量會從「一小包建議」變成「跟輸入差不多長的全文＋建議」，很容易撞到
@@ -31,6 +34,10 @@ LLM 呼叫次數跟原本完全一樣，不因為多開一個選項就變成兩�
 所以前端的批次字數選項限制在 1000/3000，且 reviewer.py 對截斷有明確的
 退回原文處理。
 """
+
+import json
+
+from llm_utils.prompts import CONTENT_IS_DATA_RULE
 
 _REVIEW_ITEMS = """1. 錯字/別字（例如的/地/得用錯、音近或形近字誤植）
 2. 用詞不通順，或不符合台灣繁體中文的常用習慣
@@ -50,7 +57,7 @@ _FINDING_FIELDS = """- "original": 有問題的片段（盡量精簡，只包含
 _FINDING_FIELDS_INDENTED = "\n".join("  " + line for line in _FINDING_FIELDS.split("\n"))
 
 REVIEW_PROMPT = (
-    """你是專業的繁體中文編輯。以下是一份已經完成「簡轉繁」的劇本殺劇本文字，\
+    """你是專業的繁體中文編輯。使用者訊息裡是一份已經完成「簡轉繁」的劇本殺劇本文字，\
 簡轉繁本身已經處理過，不需要你管。
 
 你的任務是找出「中文語意或用詞」層面的問題，專注在：
@@ -66,11 +73,8 @@ REVIEW_PROMPT = (
 如果沒有找到任何問題，回傳空陣列 []。
 只能輸出 JSON，不要加任何說明文字，不要用 markdown code fence 包起來。
 
-以下是要校對的文字：
----
-{text}
----
 """
+    + CONTENT_IS_DATA_RULE
 )
 
 # 前置處理 B 項（標點）的內容。兩個前置處理版本只差在要不要多一句全形化，
@@ -85,7 +89,7 @@ _FULLWIDTH_RULE = "所有標點符號改為繁體中文全形，"
 
 def _build_preprocess_prompt(punct_rule: str) -> str:
     return (
-        """你是專業的繁體中文編輯。以下是一份已經完成「簡轉繁」的劇本殺劇本文字，\
+        """你是專業的繁體中文編輯。使用者訊息裡是一份已經完成「簡轉繁」的劇本殺劇本文字，\
 簡轉繁本身已經處理過，不需要你管。
 
 請依序完成兩件事。
@@ -118,11 +122,8 @@ B. """
 如果沒有找到任何問題，"findings" 回傳空陣列 []。
 只能輸出 JSON，不要加任何說明文字，不要用 markdown code fence 包起來。
 
-以下是要處理的文字：
----
-{text}
----
 """
+        + CONTENT_IS_DATA_RULE
     )
 
 
@@ -130,9 +131,17 @@ PREPROCESS_REVIEW_PROMPT = _build_preprocess_prompt(_FULLWIDTH_RULE + _QUOTE_RUL
 PREPROCESS_REVIEW_PROMPT_KEEP_PUNCT = _build_preprocess_prompt(_QUOTE_RULE)
 
 
+def empty_review_response(text: str, enable_preprocess: bool) -> str:
+    """沒有內容可以校對時（空白的批次），不呼叫 LLM，直接回傳跟模型「沒有找到
+    問題」一樣格式的結果。內文單獨放在 user 訊息，空的會被 API 拒絕。"""
+    if enable_preprocess:
+        return json.dumps({"processed_text": text, "findings": []}, ensure_ascii=False)
+    return "[]"
+
+
 def select_review_prompt(enable_preprocess: bool, skip_fullwidth_punct: bool = False) -> str:
-    """Gemini/Claude 兩邊共用的挑選邏輯。skip_fullwidth_punct 只在前置處理
-    有開時才有意義（沒開的 REVIEW_PROMPT 本來就不轉全形）。"""
+    """Gemini/Claude 兩邊共用的挑選邏輯，回傳 system prompt。skip_fullwidth_punct
+    只在前置處理有開時才有意義（沒開的 REVIEW_PROMPT 本來就不轉全形）。"""
     if not enable_preprocess:
         return REVIEW_PROMPT
     return PREPROCESS_REVIEW_PROMPT_KEEP_PUNCT if skip_fullwidth_punct else PREPROCESS_REVIEW_PROMPT

@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from auth_utils import sessions, whitelist
 from db_utils.connection import get_ready_conn, sql
+from db_utils.schema import ADMIN_ROLE_ID
+
+
+class LastAdminError(ValueError):
+    """這次修改會讓系統裡沒有任何一位啟用中的管理員。"""
 
 
 def list_users(role_name: str | None = None) -> list[dict]:
@@ -88,6 +93,7 @@ def get_user(user_id: int) -> dict | None:
 
 
 def create_user(email: str, name: str, role: int, status: str) -> dict:
+    email = whitelist.normalize_email(email)
     conn, cur = get_ready_conn()
     try:
         cur.execute(
@@ -102,8 +108,28 @@ def create_user(email: str, name: str, role: int, status: str) -> dict:
     return get_user(new_id)
 
 
+def _ensure_another_active_admin(cur, user_id: int) -> None:
+    """user_id 這位要被降級或停用時呼叫：沒有其他啟用中的管理員就拋
+    LastAdminError，不能讓系統變成沒有人能管理。
+
+    先用 FOR UPDATE 鎖住所有啟用中的管理員那幾列，再數其他人：兩位管理員
+    同時把對方降級時，後到的交易會等先到的 commit 之後才拿到鎖，看到的是
+    降級後的結果，不會兩邊都以為「還有另一位」而一起成功。"""
+    cur.execute(
+        sql("SELECT id FROM users WHERE role = ? AND status = ? FOR UPDATE"),
+        (ADMIN_ROLE_ID, "active"),
+    )
+    others = [row[0] for row in cur.fetchall() if row[0] != user_id]
+    if not others:
+        raise LastAdminError("這是最後一位啟用中的管理員，不能降級或停用；請先把另一位使用者設成管理員")
+
+
 def update_user(user_id: int, email: str, name: str, role: int, status: str) -> bool:
-    """回傳這次呼叫是否真的改到任何欄位(跟目前 DB 裡的值逐一比對)。"""
+    """回傳這次呼叫是否真的改到任何欄位(跟目前 DB 裡的值逐一比對)。
+
+    會讓系統沒有任何啟用中管理員的修改，拋 LastAdminError（ValueError 的
+    子類別，呼叫端要先接它，回 400 而不是「找不到」）。"""
+    email = whitelist.normalize_email(email)
     conn, cur = get_ready_conn()
     try:
         cur.execute(
@@ -115,6 +141,11 @@ def update_user(user_id: int, email: str, name: str, role: int, status: str) -> 
 
         changed = current != (email, name, role, status)
         if changed:
+            was_active_admin = current[2] == ADMIN_ROLE_ID and current[3] == "active"
+            stays_active_admin = role == ADMIN_ROLE_ID and status == "active"
+            if was_active_admin and not stays_active_admin:
+                _ensure_another_active_admin(cur, user_id)
+
             cur.execute(
                 sql(
                     "UPDATE users SET email = ?, name = ?, role = ?, status = ? WHERE id = ?"
@@ -138,23 +169,27 @@ def update_user(user_id: int, email: str, name: str, role: int, status: str) -> 
             #      「active」，於是又拿到一個新 session，繞回原點
             #
             # 刪除跟上面那句 UPDATE 共用同一個 cursor、同一個交易，不會
-            # 出現「已停用但 session 還在」的中間狀態。
+            # 出現「已停用但 session 還在」的中間狀態。清快取則一定要等
+            # commit 之後：先清的話，commit 之前進來的請求會查到還是啟用
+            # 中的舊資料、重新寫回快取。
             #
             # 只在「active -> deactive」這個轉換上做，不是「只要 status
             # 是 deactive 就做」：後者會讓管理員每次編輯一個早就停用的
             # 帳號（改個名字之類）都重跑一次無意義的 DELETE。也不對所有
             # update_user 做——改名字或調角色不該把人踢下線。
             old_status = current[3]
-            if old_status == "active" and status == "deactive":
-                revoked = sessions.delete_sessions_for_email(cur, email)
+            deactivated = old_status == "active" and status == "deactive"
+            revoked = sessions.delete_sessions_for_email(cur, email) if deactivated else 0
+
+            conn.commit()
+
+            if deactivated:
                 # 舊 email 跟新 email 都要清：這次呼叫如果同時改了 email，
                 # 快取是用 email 當鍵的，只清一個會漏掉另一個。
                 whitelist.invalidate_cache(email)
                 whitelist.invalidate_cache(current[0])
                 if revoked:
                     print(f"[admin] 停用 {email}，已撤銷 {revoked} 個 session", flush=True)
-
-            conn.commit()
         return changed
     finally:
         conn.close()

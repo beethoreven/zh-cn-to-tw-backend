@@ -25,6 +25,7 @@ from pattern import report as pattern_report
 from pattern import template as pattern_template
 from pattern.analyzer import run_analysis as run_pattern_analysis
 from pipeline.orchestrator import run_refine_only_pipeline
+from request_limits import limits as request_limits
 from review import review_manager
 from review.reviewer import run_review
 from usage.fx_rate import get_usd_twd_rate
@@ -78,6 +79,20 @@ CORS(
     ],
     allow_headers=["Content-Type", "Authorization"],
     expose_headers=["Content-Disposition"],
+)
+
+# 請求大小與頻率的上限，理由與門檻見 request_limits/limits.py 與
+# configs/config.py。這裡列的是 view 函式名稱（Flask 的 endpoint），新增會
+# 呼叫 LLM 的路由或收檔案的路由時要加進來。
+request_limits.install(
+    app,
+    llm_endpoints={
+        "create_job_from_ocr_text",
+        "start_pattern_analysis",
+        "start_review",
+        "rerun_review",
+    },
+    upload_endpoints={"create_direct_job"},
 )
 
 
@@ -205,8 +220,14 @@ def health():
 def active_jobs():
     """目前有幾個工作正在跑。刻意不要求登入：這支是給「部署前先確認
     沒有人的工作跑到一半」用的，部署腳本／CI 拿不到使用者的 session
-    token，而這裡只回一個數字，不洩漏任何內容。"""
-    return jsonify({"active": job_store.count_active()})
+    token，而這裡只回一個數字，不洩漏任何內容。
+
+    數的是這個行程記憶體裡還在跑的工作，不查資料庫：不需要登入的端點
+    不該開資料庫連線（同時連線上限只有 5，見 db_utils/connection.py），
+    而這個服務只有一個行程，記憶體裡的就是全部真正在跑的工作。資料庫裡
+    標成 running、但其實已經沒人在跑的紀錄（例如行程被砍掉），反正部署
+    也救不回來，不該擋住部署。"""
+    return jsonify({"active": len(job_store.local_active_ids())})
 
 
 _TA_NOTICE_PATH = os.path.join(os.path.dirname(__file__), "ta-notice.txt")
@@ -299,6 +320,9 @@ def auth_login():
     email = auth.verify_google_id_token(body.get("id_token"), body.get("nonce"))
     if email is None:
         return jsonify({"error": "Google 登入憑證無效或已過期，請重新登入"}), 401
+    # session 與之後建立的工作紀錄一律存小寫，跟 users 表同一個規則（見
+    # whitelist.normalize_email）
+    email = whitelist.normalize_email(email)
 
     if not whitelist.is_permitted_user(email):
         return jsonify({"error": "此帳號尚未獲得授權", "email": email}), 403
@@ -624,11 +648,14 @@ def create_direct_job():
     file = request.files["file"]
     filename_lower = file.filename.lower()
 
+    hidden_text_chars = 0
     try:
         if filename_lower.endswith(".txt"):
             text = file.read().decode("utf-8")
         elif filename_lower.endswith(".docx"):
-            text = docx_file_to_text(file)
+            # Word 裡設成隱藏的文字會略過（理由見 docx_file_to_text），字數
+            # 回給前端提示使用者；舊版前端不認得這個欄位，會直接忽略
+            text, hidden_text_chars = docx_file_to_text(file)
         else:
             return jsonify({"error": "只接受 .docx 或 .txt 檔案"}), 400
     except UnicodeDecodeError:
@@ -636,10 +663,13 @@ def create_direct_job():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"讀取檔案內容失敗：{exc}"}), 400
 
+    if hidden_text_chars:
+        print(f"[direct-upload] 略過 Word 檔裡 {hidden_text_chars} 個字的隱藏文字", flush=True)
+
     job_id = job_manager.create_job(original_filename=file.filename, user_email=request.user_email)
     job_manager.set_result(job_id, text)
 
-    return jsonify({"job_id": job_id}), 202
+    return jsonify({"job_id": job_id, "hidden_text_chars": hidden_text_chars}), 202
 
 
 def _get_owned_job(job_id: str):
@@ -651,9 +681,17 @@ def _get_owned_job(job_id: str):
     知道「這個 ID 其實存在，只是不是你的」。管理員也不例外——管理員
     介面本來就沒有瀏覽 job 的功能，不需要為了不存在的需求開這個後門。"""
     job = job_manager.get_job(job_id)
-    if job is None or job.get("user_email") != request.user_email:
+    if job is None or not _same_email(job.get("user_email"), request.user_email):
         return None, (jsonify({"error": "找不到這個 job"}), 404)
     return job, None
+
+
+def _same_email(a, b) -> bool:
+    """email 一律不分大小寫比對。登入時會轉成小寫（見 /auth/login），但
+    改成這樣之前建立的 session 與工作紀錄存的是 Google 當時給的原樣，兩邊
+    大小寫可能不同；直接用等號比對，同一個人會被當成別人、看不到自己的
+    工作。"""
+    return bool(a) and bool(b) and a.lower() == b.lower()
 
 
 def _get_owned_review(review_id: str):
@@ -661,7 +699,7 @@ def _get_owned_review(review_id: str):
     一樣：review_id 難猜，但不是猜不到就等於安全，一定要是自己建立的
     review 才給資料。"""
     review = review_manager.get_review(review_id)
-    if review is None or review.get("user_email") != request.user_email:
+    if review is None or not _same_email(review.get("user_email"), request.user_email):
         return None, (jsonify({"error": "找不到這個 review"}), 404)
     return review, None
 
@@ -891,7 +929,7 @@ def download_pattern_report(job_id):
 def _get_owned_pattern_analysis(analysis_id: str):
     """邏輯跟 _get_owned_job 一樣：一定要是自己建立的才給資料。"""
     analysis = pattern_analysis_manager.get_analysis(analysis_id)
-    if analysis is None or analysis.get("user_email") != request.user_email:
+    if analysis is None or not _same_email(analysis.get("user_email"), request.user_email):
         return None, (jsonify({"error": "找不到這份分析報告"}), 404)
     return analysis, None
 
@@ -1329,6 +1367,8 @@ def admin_update_user(user_id):
 
     try:
         changed = admin_users.update_user(user_id, email, name, role, status)
+    except admin_users.LastAdminError as exc:
+        return jsonify({"error": str(exc)}), 400
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "user": admin_users.get_user(user_id)})

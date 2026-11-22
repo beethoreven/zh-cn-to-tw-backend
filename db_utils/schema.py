@@ -16,8 +16,8 @@
 跟 usage_log 原本的做法一樣：這些都是冪等操作（CREATE TABLE IF NOT
 EXISTS、補欄位前先檢查），但只需要在這個 process 生命週期裡成功跑過
 一次，跑第二次結果不會變，卻會對 Postgres（尤其 Neon 這種每次連線都
-有實質延遲的服務）多花時間。第一次呼叫成功後就把旗標打開，之後的
-呼叫直接跳過整段檢查。
+有實質延遲的服務）多花時間。第一次呼叫成功、而且 commit 之後才把旗標
+打開，之後的呼叫直接跳過整段檢查。
 
 補欄位那幾處是「先查 information_schema 確認欄位不存在、再 ALTER TABLE
 ADD COLUMN」，中間沒有 IF NOT EXISTS 保護，兩個請求在冷啟動時第一次
@@ -45,6 +45,11 @@ _DEFAULT_PERMISSIONS = [
     (1, "admin", 999999),
     (2, "user", 10),
 ]
+
+# 管理員角色的 id。誰是管理員一律看 users.role 是不是這個 id，不看角色名稱：
+# 名稱可以在管理介面的「權限管理」改（見 auth_utils/whitelist.py）。上面的
+# 種子資料保證新建的資料庫裡管理員就是 id=1。
+ADMIN_ROLE_ID = 1
 
 
 def _existing_columns(cur, table: str) -> set[str]:
@@ -76,6 +81,11 @@ def ensure_schema(cur) -> None:
         _ensure_jobs(cur)
         _ensure_app_versions(cur)
 
+        # 先 commit 再打開旗標。反過來的話，從旗標打開到 commit 之間，其他
+        # 執行緒會跳過這段、直接去查還沒 commit 的表（別的連線看不到，查詢
+        # 會失敗）；commit 要是失敗，旗標也已經打開，到行程重啟之前都不會
+        # 再建一次，每個請求都會出錯。
+        cur.connection.commit()
         _schema_ready = True
 
 
@@ -105,6 +115,16 @@ def _ensure_permissions(cur) -> None:
         # id=1/2 已經存在——重設序列起點，確保之後自動產生的 id 從 3 開始
         cur.execute("SELECT setval('permissions_id_seq', (SELECT MAX(id) FROM permissions))")
 
+    # 管理員身分只認 id=1。資料庫如果不是由上面的種子資料建立、管理員角色的
+    # id 不是 1，管理員會變成一般使用者——留一行警告，部署後看 log 就知道
+    cur.execute("SELECT id FROM permissions WHERE LOWER(role) = 'admin' AND id <> %s", (ADMIN_ROLE_ID,))
+    if cur.fetchall():
+        print(
+            f"[schema] 警告：有名稱是 admin、但 id 不是 {ADMIN_ROLE_ID} 的角色；"
+            f"管理員身分只認 id={ADMIN_ROLE_ID}",
+            flush=True,
+        )
+
 
 def _ensure_users(cur) -> None:
     cur.execute(
@@ -118,6 +138,47 @@ def _ensure_users(cur) -> None:
         )
         """
     )
+    _normalize_user_emails(cur)
+
+
+_USERS_EMAIL_LOWER_INDEX = "users_email_lower_key"
+
+
+def _normalize_user_emails(cur) -> None:
+    """把 users.email 轉成小寫，並加上不分大小寫的唯一限制。
+
+    原本的 UNIQUE 分大小寫，查詢卻不分（LOWER() 比對），所以同一個人可以
+    被建成兩筆只差大小寫的帳號，查詢時拿到哪一筆不一定。程式從這一版起
+    一律存小寫（見 auth_utils/whitelist.py 的 normalize_email）。
+
+    已經有只差大小寫的重複帳號時不動：轉小寫會撞到原本的 UNIQUE、建索引
+    也會失敗，這時候要由管理員決定留哪一筆，程式不該自己挑。只留一行警告，
+    處理掉之後下次啟動會自動完成。整段包在 savepoint 裡：萬一還是失敗，
+    只撤銷這一段，不能讓整個 ensure_schema 失敗——那會讓每個請求都在這裡
+    出錯，等於整個服務停擺。"""
+    cur.execute("SELECT 1 FROM pg_indexes WHERE tablename = 'users' AND indexname = %s", (_USERS_EMAIL_LOWER_INDEX,))
+    if cur.fetchone():
+        return
+
+    cur.execute("SELECT COUNT(*) FROM (SELECT 1 FROM users GROUP BY LOWER(email) HAVING COUNT(*) > 1) AS d")
+    duplicate_groups = cur.fetchone()[0]
+    if duplicate_groups:
+        print(
+            f"[schema] 警告：users 有 {duplicate_groups} 組 email 只差在大小寫，"
+            "這次沒有轉成小寫、也沒有加上不分大小寫的唯一限制；"
+            "請到管理介面把重複的帳號改掉，下次啟動會自動完成",
+            flush=True,
+        )
+        return
+
+    cur.execute("SAVEPOINT normalize_user_emails")
+    try:
+        cur.execute("UPDATE users SET email = LOWER(email) WHERE email <> LOWER(email)")
+        cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {_USERS_EMAIL_LOWER_INDEX} ON users (LOWER(email))")
+        cur.execute("RELEASE SAVEPOINT normalize_user_emails")
+    except Exception as exc:  # noqa: BLE001
+        cur.execute("ROLLBACK TO SAVEPOINT normalize_user_emails")
+        print(f"[schema] users.email 轉小寫失敗，這次先略過：{exc}", flush=True)
 
 
 def _ensure_projects(cur) -> None:
