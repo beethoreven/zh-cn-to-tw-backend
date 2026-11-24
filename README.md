@@ -39,7 +39,7 @@ zh-cn-to-tw/                     ← meta-repo，本機開發統一入口，本�
 這個架構是**演化來的，不是一開始就設計成這樣**——最初版本很單純：Render 後端接一切（含 OCR），瀏覽器直接打開 GitHub Pages 用。後來實測 Render 免費方案（0.1 CPU、512MB RAM）完全扛不住 PaddleOCR（見下方「為什麼 OCR 搬到使用者本機」），才逐步演變出桌面版這個做法。桌面版現在是**唯一的使用方式**：
 
 - **桌面版**(zh-cn-to-tw-mac):OCR 在使用者自己的機器上跑（11+ 走 `zh-cn-to-tw-ocr-service`，10.15 走 Apple Vision framework），只把 OCR 完的簡體文字傳給這支 backend 做簡轉繁/LLM 潤飾(`POST /api/jobs/from-ocr-text`)，backend 完全不碰 PDF。
-- **舊的瀏覽器版路徑已經拔掉**（2026-10-03）:PDF 直接上傳給這支 backend、OCR 在 Render 上跑的 `POST /api/jobs`，連同 `run_ocr_stage`、`ocr_utils/` 與 paddle 相關套件一起移除，原因見下方「拔掉伺服器端 OCR、升級到 Python 3.12」。前端在瀏覽器模式下按 Stage 1 只會提示要改用桌面版。
+- **舊的瀏覽器版路徑已經拔掉**（2026-10-03）:PDF 直接上傳給這支 backend、OCR 在 Render 上跑的 `POST /api/jobs`，連同 `run_ocr_stage`、`ocr_utils/` 與 paddle 相關套件一起移除，原因見下方「拔掉伺服器端 OCR、升級到 Python 3.12」。前端只剩桌面版，直接用瀏覽器打開只會顯示要改用桌面版。
 
 ### 為什麼 OCR 搬到使用者本機（重大架構決策）
 
@@ -221,6 +221,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+`requirements.txt` 連同間接相依與每個檔案的雜湊一起鎖住，pip 會自動比對雜湊，對不上就拒絕安裝。不要手改它：要新增或升級套件，改 `requirements.in`（直接相依與停版原因都寫在那裡），再照該檔開頭的指令用 `uv pip compile` 重新產生。
 
 ### 3. 設定環境變數
 
@@ -443,7 +445,7 @@ zh-cn-to-tw/                     ← meta-repo, unified local-dev entry, never d
 This architecture **evolved, it wasn't designed this way from day one** — the original version was simple: Render handled everything (including OCR), and a browser opened GitHub Pages directly. It turned out Render's free tier (0.1 CPU, 512MB RAM) couldn't handle PaddleOCR at all (see "Why OCR Moved to the User's Own Machine" below), which is what eventually produced the desktop app. The desktop path is now **the only way to be used**:
 
 - **Desktop path** (zh-cn-to-tw-mac): OCR runs on the user's own machine (`zh-cn-to-tw-ocr-service` on 11+, Apple's Vision framework on 10.15); only the already-OCR'd plain text is sent to this backend for conversion/LLM polish (`POST /api/jobs/from-ocr-text`). This backend never touches a PDF.
-- **The old browser path has been removed** (2026-10-03): `POST /api/jobs` — PDFs uploaded straight to this backend with OCR running on Render — is gone, together with `run_ocr_stage`, `ocr_utils/`, and the paddle-related packages. See "Removing Server-Side OCR and Moving to Python 3.12" below for why. In browser mode, the frontend's Stage 1 now just tells the user to use the desktop app.
+- **The old browser path has been removed** (2026-10-03): `POST /api/jobs` — PDFs uploaded straight to this backend with OCR running on Render — is gone, together with `run_ocr_stage`, `ocr_utils/`, and the paddle-related packages. See "Removing Server-Side OCR and Moving to Python 3.12" below for why. The frontend is now desktop-only; opened directly in a browser it just tells the user to use the desktop app.
 
 ### Why OCR Moved to the User's Own Machine (major architecture pivot)
 
@@ -625,6 +627,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+`requirements.txt` locks the indirect dependencies too, along with every file's hash; pip checks the hashes automatically and refuses to install anything that doesn't match. Don't edit it by hand: to add or upgrade a package, change `requirements.in` (the direct dependencies and the reasons for any held versions live there), then regenerate it with `uv pip compile` using the command at the top of that file.
 
 ### 3. Set Environment Variables
 

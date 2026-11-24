@@ -1,0 +1,27 @@
+# 直接相依。requirements.txt 由這個檔案產生，連同間接相依與雜湊一起鎖住，
+# 不要手改 requirements.txt。改完這個檔案後重新產生：
+#   uv pip compile requirements.in --python-version 3.12 --universal --generate-hashes -o requirements.txt
+# requirements.txt 帶了雜湊，pip install -r requirements.txt 會自動比對每個
+# 下載檔的雜湊，對不上就拒絕安裝。
+#
+# 版本一律用最新的正式版（2026-11-25 查 PyPI），例外如下：
+Flask==3.1.3
+Flask-Cors==6.0.5
+python-dotenv==1.2.4
+opencc-python-reimplemented==0.1.7
+python-docx==1.2.0
+requests==2.34.2
+psycopg2-binary==2.9.13
+google-auth==2.63.1
+# anthropic 與 google-genai 停在目前大版本的最後一版：最新是 anthropic 2.x、
+# google-genai 3.x，大版本改了 API，這兩個套件是實際呼叫 LLM 的地方，自動
+# 測試把 LLM 呼叫換成假的、驗不到，要用真的 LLM 跑過 Stage 1／3 才能換。
+anthropic==0.125.0
+google-genai==2.34.0
+# google-auth 的相依。49.0 起不再提供 macOS Intel (x86_64) wheel，Intel Mac 上會改成
+# 從原始碼編譯（需要 Rust）而卡住，所以只有 macOS（本機開發）停在 48.0.1，也就是
+# macOS Intel 還有 wheel 的最後一版。Render 跑的是 Linux，用最新版：48.0.1 有
+# 49.0、50.0 才修掉的已公開弱點（憑證路徑建構、名稱限制、PKCS#7 解密），這個
+# 後端都沒用到那些功能，但正式環境不該留著。
+cryptography==50.0.2 ; sys_platform != "darwin"
+cryptography==48.0.1 ; sys_platform == "darwin"

@@ -41,11 +41,12 @@ app = Flask(__name__)
 # outbound bandwidth。瀏覽器解析出來的內容完全一樣。
 app.json.ensure_ascii = False
 
-# 前端（GitHub Pages）透過瀏覽器 fetch 呼叫這裡，需要 CORS 允許來源網域。
-# 本機開發（任意 port 的 localhost/127.0.0.1）也一併放行方便測試。
-# 桌面版 App 的網頁前端包在 App 裡、由殼直接載入，不同載入方式送出的
-# Origin 不一樣，三種都要放行，不然桌面版 App 打任何 API 都會被 CORS
-# 擋下來：
+# 前端只有桌面版：網頁包在 App 裡、由殼直接載入，透過 WebView 的 fetch
+# 呼叫這裡，需要 CORS 允許來源。不同載入方式送出的 Origin 不一樣，三種
+# 都要放行，不然桌面版 App 打任何 API 都會被 CORS 擋下來。本機開發（任意
+# port 的 localhost/127.0.0.1）也一併放行方便測試。以前的純瀏覽器版
+# （GitHub Pages）已經停用，那個網址現在只放下載頁、不呼叫後端，所以不在
+# 清單裡：
 # - "https://zh-cn-to-tw.example"：2.0 起的 Windows 版。殼用 WebView2 的
 #   虛擬主機對應，把網頁資料夾對應到這個固定網址（.example 是保留給範例
 #   用、保證不會有真實網站的網域）。見 zh-cn-to-tw-windows 的
@@ -70,7 +71,6 @@ app.json.ensure_ascii = False
 CORS(
     app,
     origins=[
-        "https://beethoreven.github.io",
         r"http://localhost:\d+",
         r"http://127\.0\.0\.1:\d+",
         "https://zh-cn-to-tw.example",
