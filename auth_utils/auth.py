@@ -57,10 +57,11 @@ def nonce_is_acceptable(token_nonce, raw_nonce) -> bool:
     湊不出原值,不能拿它來換 session。如果直接比對 token 裡的 nonce,
     擋不住這種情況:token 裡的值誰都讀得到,照抄送來就能通過。
 
-    沒送原值時只放行兩種 token,都是還沒改成這套做法的用戶端:
-    - nonce 是舊版桌面殼的格式(見 _LEGACY_NONCE)。
-    - 沒有 nonce:瀏覽器版(Google Identity Services)沒有帶。
-    新版桌面殼的 token 一定帶著雜湊格式的 nonce,沒有原值就不放行。
+    沒送原值時只放行 nonce 是舊版桌面殼格式的 token(見 _LEGACY_NONCE),
+    那些用戶端還沒改成這套做法。新版桌面殼的 token 一定帶著雜湊格式的
+    nonce,沒有原值就不放行。完全沒有 nonce 的 token 一律拒絕:每一版桌面殼
+    的登入網址都帶 nonce,沒有 nonce 代表這個 token 不是從桌面殼的登入流程
+    拿到的(以前只有已經停用的瀏覽器版會這樣)。
     """
     if raw_nonce is not None:
         if not isinstance(raw_nonce, str) or not raw_nonce or len(raw_nonce) > _MAX_RAW_NONCE_LENGTH:
@@ -72,8 +73,6 @@ def nonce_is_acceptable(token_nonce, raw_nonce) -> bool:
         return hmac.compare_digest(
             token_nonce.encode("utf-8"), hashed_nonce(raw_nonce).encode("ascii")
         )
-    if token_nonce is None:
-        return True
     return isinstance(token_nonce, str) and _LEGACY_NONCE.fullmatch(token_nonce) is not None
 
 
