@@ -159,8 +159,10 @@ for label, key in [("missing", None), ("too short", "short")]:
     env = {k: v for k, v in os.environ.items() if k != "SESSION_SIGNING_KEY"}
     if key is not None:
         env["SESSION_SIGNING_KEY"] = key
-    p = subprocess.run([sys.executable, "-c", "import auth_utils.sessions"], cwd=harness.BACKEND, env=env,
-                       capture_output=True, text=True)
+    # the child process must not load a developer's real .env either (it holds production
+    # secrets, and its SESSION_SIGNING_KEY would make this check pass for the wrong reason)
+    child = "import dotenv; dotenv.load_dotenv = lambda *a, **k: False; import auth_utils.sessions"
+    p = subprocess.run([sys.executable, "-c", child], cwd=harness.BACKEND, env=env, capture_output=True, text=True)
     check(f"signing key {label}: the backend refuses to start", p.returncode != 0 and "SESSION_SIGNING_KEY" in p.stderr,
           p.stderr[-200:])
 
