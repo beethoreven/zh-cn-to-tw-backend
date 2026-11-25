@@ -11,6 +11,7 @@ from functools import wraps
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
+from admin_utils import audit_log
 from admin_utils import permissions as admin_permissions
 from admin_utils import projects as admin_projects
 from admin_utils import users as admin_users
@@ -110,7 +111,7 @@ def _startup_recover_jobs() -> None:
        對話窗，變成無聲卡死。原本是「啟動時把 pending/running 全部標成
        interrupted」，部署時新舊實例重疊就會誤標還在跑的工作，最後讓它
        永遠停在 running。
-    2. 每小時清一次過期的工作紀錄與閒置 session。
+    2. 每小時清一次過期的工作紀錄、閒置 session 與超過保留期的管理操作紀錄。
 
     都在背景執行緒做：要連 Neon（冷啟動可能近 10 秒），不能擋住 web
     server 開始接受連線。"""
@@ -146,6 +147,12 @@ def _startup_recover_jobs() -> None:
                     print(f"[cleanup] 已清除 {idle} 筆超過 {sessions.SESSION_IDLE_DAYS} 天沒用過的 session", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[cleanup] session 清理失敗，下一輪再試：{exc}", flush=True)
+            try:
+                old_audit = audit_log.delete_expired()
+                if old_audit:
+                    print(f"[cleanup] 已清除 {old_audit} 筆超過 {audit_log.RETENTION_DAYS} 天的管理操作紀錄", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] 管理操作紀錄清理失敗，下一輪再試：{exc}", flush=True)
             time.sleep(3600)
 
     threading.Thread(target=heartbeat_and_sweep, daemon=True).start()
@@ -192,18 +199,54 @@ def require_auth(view_func):
     return wrapper
 
 
+# 管理 API 的動作代碼，寫進管理操作紀錄。沒列在這裡的（讀取類）在
+# 被拒絕時記成 admin.view。
+_ADMIN_ACTIONS = {
+    "admin_create_user": "user.create",
+    "admin_update_user": "user.update",
+    "admin_update_permission": "permission.update",
+    "admin_create_project": "project.create",
+    "admin_update_project": "project.update",
+}
+
+
+def _admin_target_id() -> int | None:
+    """路徑裡的對象 id（/admin/users/<user_id> 這類），沒有就是 None。"""
+    for value in (request.view_args or {}).values():
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _audit_admin_failure(action: str) -> None:
+    """管理員發出的操作沒有成立（欄位不合法、找不到對象、最後一位管理員）。"""
+    audit_log.record_standalone(request.user_email, action, _admin_target_id(), audit_log.RESULT_FAILED)
+
+
 def require_admin(view_func):
     """
     裝飾器：跟 require_auth 一樣先驗證登入/授權，另外還要求這個帳號
     的角色是管理員，不然一律 401。用在管理員介面（使用者/權限/專案
     管理）的所有 API 上。
+
+    已登入、但不是管理員的人呼叫管理 API，記一筆 denied 進管理操作紀錄。
+    沒登入（token 無效）的不記：那種請求誰都能送，記下來只會讓任何人都能
+    往這張表灌資料，而且也不知道是誰。
     """
 
     @wraps(view_func)
     def wrapper(*args, **kwargs):
         token = auth.extract_bearer_token(request)
         email = sessions.resolve_session(token)
-        if email is None or not whitelist.is_admin_user(email):
+        if email is None:
+            return jsonify({"error": "未登入或此帳號未獲管理員授權"}), 401
+        if not whitelist.is_admin_user(email):
+            audit_log.record_standalone(
+                email,
+                _ADMIN_ACTIONS.get(request.endpoint, "admin.view"),
+                _admin_target_id(),
+                audit_log.RESULT_DENIED,
+            )
             return jsonify({"error": "未登入或此帳號未獲管理員授權"}), 401
         request.user_email = email
         return view_func(*args, **kwargs)
@@ -1244,10 +1287,14 @@ def download_review(review_id):
 
 # --- 管理員介面 ---
 #
-# 這一整段都掛 require_admin，只有 users.role 對應到 permissions.role
-# = "admin" 的帳號能呼叫。「有沒有真的改到東西」的判斷都在 admin_utils
-# 那幾支模組裡做（比對 DB 現有值 vs 送進來的新值），這裡只負責把
-# request 的資料轉成呼叫參數、把結果包成 API 回應。
+# 這一整段都掛 require_admin，只有 users.role 是管理員角色 id 的帳號能
+# 呼叫。「有沒有真的改到東西」的判斷都在 admin_utils 那幾支模組裡做
+# （比對 DB 現有值 vs 送進來的新值），這裡只負責把 request 的資料轉成
+# 呼叫參數、把結果包成 API 回應。
+#
+# 寫入類的操作都會進管理操作紀錄（admin_utils/audit_log.py）：成功的由
+# admin_utils 跟資料寫在同一個交易裡；沒成立的在這裡用 _audit_admin_failure
+# 另外記。
 
 
 def _require_status(raw_value: str, valid: tuple, field_name: str) -> str:
@@ -1341,12 +1388,14 @@ def admin_create_user():
         role = _require_role_id(body.get("role"))
         status = _require_status(body.get("status"), ("active", "deactive"), "狀態")
     except ValueError as exc:
+        _audit_admin_failure("user.create")
         return jsonify({"error": str(exc)}), 400
 
     try:
-        user = admin_users.create_user(email, name, role, status)
+        user = admin_users.create_user(email, name, role, status, actor_email=request.user_email)
     except Exception as exc:  # noqa: BLE001
         # 最常見的失敗原因是 email 已經存在(UNIQUE 限制)
+        _audit_admin_failure("user.create")
         return jsonify({"error": f"建立失敗：{exc}"}), 400
     return jsonify(user), 201
 
@@ -1363,13 +1412,18 @@ def admin_update_user(user_id):
         role = _require_role_id(body.get("role"))
         status = _require_status(body.get("status"), ("active", "deactive"), "狀態")
     except ValueError as exc:
+        _audit_admin_failure("user.update")
         return jsonify({"error": str(exc)}), 400
 
     try:
-        changed = admin_users.update_user(user_id, email, name, role, status)
+        changed = admin_users.update_user(
+            user_id, email, name, role, status, actor_email=request.user_email
+        )
     except admin_users.LastAdminError as exc:
+        _audit_admin_failure("user.update")
         return jsonify({"error": str(exc)}), 400
     except ValueError as exc:
+        _audit_admin_failure("user.update")
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "user": admin_users.get_user(user_id)})
 
@@ -1404,11 +1458,15 @@ def admin_update_permission(permission_id):
         if allowed_haiku < 0:
             raise ValueError("使用上限不能是負數")
     except (TypeError, ValueError) as exc:
+        _audit_admin_failure("permission.update")
         return jsonify({"error": str(exc) or "使用上限必須是數字"}), 400
 
     try:
-        changed = admin_permissions.update_permission(permission_id, role, allowed_haiku)
+        changed = admin_permissions.update_permission(
+            permission_id, role, allowed_haiku, actor_email=request.user_email
+        )
     except ValueError as exc:
+        _audit_admin_failure("permission.update")
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "permission": admin_permissions.get_permission(permission_id)})
 
@@ -1439,11 +1497,13 @@ def admin_create_project():
         owners = _parse_project_owners(body)
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
+        _audit_admin_failure("project.create")
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
 
     try:
-        project = admin_projects.create_project(name, owners, status)
+        project = admin_projects.create_project(name, owners, status, actor_email=request.user_email)
     except Exception as exc:  # noqa: BLE001
+        _audit_admin_failure("project.create")
         return jsonify({"error": f"建立失敗：{exc}"}), 400
     return jsonify(project), 201
 
@@ -1468,13 +1528,36 @@ def admin_update_project(project_id):
         owners = _parse_project_owners(body)
         status = _require_status(body.get("status"), admin_projects.VALID_STATUSES, "狀態")
     except (TypeError, ValueError) as exc:
+        _audit_admin_failure("project.update")
         return jsonify({"error": str(exc) or "負責人必須是數字"}), 400
 
     try:
-        changed = admin_projects.update_project(project_id, name, owners, status)
+        changed = admin_projects.update_project(
+            project_id, name, owners, status, actor_email=request.user_email
+        )
     except ValueError as exc:
+        _audit_admin_failure("project.update")
         return jsonify({"error": str(exc)}), 404
     return jsonify({"changed": changed, "project": admin_projects.get_project(project_id)})
+
+
+@app.get("/admin/audit-log")
+@require_admin
+def admin_list_audit_log():
+    """管理操作紀錄，唯讀，新的在前。limit 預設 100、最多
+    audit_log.MAX_LIST_LIMIT；往前翻頁帶上一頁最後一筆的 id 當 before_id。"""
+    try:
+        limit = int(request.args.get("limit", 100))
+        raw_before = request.args.get("before_id")
+        before_id = int(raw_before) if raw_before not in (None, "") else None
+    except ValueError:
+        return jsonify({"error": "limit、before_id 必須是數字"}), 400
+    return jsonify(
+        {
+            "entries": audit_log.list_entries(limit=limit, before_id=before_id),
+            "retention_days": audit_log.RETENTION_DAYS,
+        }
+    )
 
 
 if __name__ == "__main__":

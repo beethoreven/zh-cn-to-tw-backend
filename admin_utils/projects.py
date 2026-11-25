@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from configs import config
+from admin_utils import audit_log
 from db_utils.connection import get_ready_conn, sql
 
 VALID_STATUSES = ("pending", "ongoing", "delayed", "done_not_paid", "paid", "closed")
@@ -105,33 +106,40 @@ def is_project_owner(project: dict, user_id: int | None) -> bool:
     return user_id in (project["owner_1"], project["owner_2"], project["owner_3"])
 
 
-def create_project(name: str, owners: tuple[int | None, int | None, int | None], status: str) -> dict:
+def create_project(
+    name: str, owners: tuple[int | None, int | None, int | None], status: str, *, actor_email: str
+) -> dict:
+    """actor_email 是執行這個操作的管理員，跟新專案寫在同一個交易裡記進
+    管理操作紀錄。"""
     conn, cur = get_ready_conn()
     try:
+        # 專案名稱沒有唯一性限制，不能拿來反查剛建立的那筆，用 RETURNING
+        # 直接拿 id
         cur.execute(
             sql(
                 "INSERT INTO projects (name, owner_1, owner_2, owner_3, status) "
-                "VALUES (?, ?, ?, ?, ?)"
+                "VALUES (?, ?, ?, ?, ?) RETURNING id"
             ),
             (name, *owners, status),
         )
+        new_id = cur.fetchone()[0]
+        audit_log.record(cur, actor_email, "project.create", new_id, audit_log.RESULT_SUCCESS)
         conn.commit()
-        # 專案名稱沒有唯一性限制，不能像 users.email 那樣拿來反查剛
-        # 建立的那筆——改用「這個 process 剛剛插入的那一列」來查
-        if hasattr(cur, "lastrowid") and cur.lastrowid:
-            new_id = cur.lastrowid
-        else:
-            cur.execute("SELECT lastval()")
-            new_id = cur.fetchone()[0]
     finally:
         conn.close()
     return get_project(new_id)
 
 
 def update_project(
-    project_id: int, name: str, owners: tuple[int | None, int | None, int | None], status: str
+    project_id: int,
+    name: str,
+    owners: tuple[int | None, int | None, int | None],
+    status: str,
+    *,
+    actor_email: str,
 ) -> bool:
-    """回傳這次呼叫是否真的改到任何欄位。"""
+    """回傳這次呼叫是否真的改到任何欄位。有改到的話，跟 UPDATE 同一個交易
+    記進管理操作紀錄；actor_email 是執行這個操作的管理員。"""
     conn, cur = get_ready_conn()
     try:
         cur.execute(
@@ -151,6 +159,7 @@ def update_project(
                 ),
                 (name, *owners, status, project_id),
             )
+            audit_log.record(cur, actor_email, "project.update", project_id, audit_log.RESULT_SUCCESS)
             conn.commit()
         return changed
     finally:

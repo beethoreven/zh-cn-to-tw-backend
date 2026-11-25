@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from admin_utils import audit_log
 from auth_utils import sessions, whitelist
 from db_utils.connection import get_ready_conn, sql
 from db_utils.schema import ADMIN_ROLE_ID
@@ -92,17 +93,19 @@ def get_user(user_id: int) -> dict | None:
         conn.close()
 
 
-def create_user(email: str, name: str, role: int, status: str) -> dict:
+def create_user(email: str, name: str, role: int, status: str, *, actor_email: str) -> dict:
+    """actor_email 是執行這個操作的管理員，跟新帳號寫在同一個交易裡記進
+    管理操作紀錄。"""
     email = whitelist.normalize_email(email)
     conn, cur = get_ready_conn()
     try:
         cur.execute(
-            sql("INSERT INTO users (email, name, role, status) VALUES (?, ?, ?, ?)"),
+            sql("INSERT INTO users (email, name, role, status) VALUES (?, ?, ?, ?) RETURNING id"),
             (email, name, role, status),
         )
-        conn.commit()
-        cur.execute(sql("SELECT id FROM users WHERE email = ?"), (email,))
         new_id = cur.fetchone()[0]
+        audit_log.record(cur, actor_email, "user.create", new_id, audit_log.RESULT_SUCCESS)
+        conn.commit()
     finally:
         conn.close()
     return get_user(new_id)
@@ -124,8 +127,29 @@ def _ensure_another_active_admin(cur, user_id: int) -> None:
         raise LastAdminError("這是最後一位啟用中的管理員，不能降級或停用；請先把另一位使用者設成管理員")
 
 
-def update_user(user_id: int, email: str, name: str, role: int, status: str) -> bool:
+def _audit_actions_for_update(current: tuple, email: str, name: str, role: int, status: str) -> list[str]:
+    """一次儲存可能同時改好幾種東西，每一種各記一筆，事後才查得到
+    「誰停用了這個帳號」「誰把這個人升成管理員」，不會被一筆籠統的
+    「修改使用者」蓋過去。"""
+    old_email, old_name, old_role, old_status = current
+    actions = []
+    if old_status == "active" and status == "deactive":
+        actions.append("user.deactivate")
+    elif old_status != "active" and status == "active":
+        actions.append("user.activate")
+    if old_role != role:
+        actions.append("user.role_change")
+    if (old_email, old_name) != (email, name):
+        actions.append("user.update")
+    return actions
+
+
+def update_user(
+    user_id: int, email: str, name: str, role: int, status: str, *, actor_email: str
+) -> bool:
     """回傳這次呼叫是否真的改到任何欄位(跟目前 DB 裡的值逐一比對)。
+    有改到的話，跟 UPDATE 同一個交易記進管理操作紀錄；actor_email 是執行
+    這個操作的管理員。
 
     會讓系統沒有任何啟用中管理員的修改，拋 LastAdminError（ValueError 的
     子類別，呼叫端要先接它，回 400 而不是「找不到」）。"""
@@ -180,6 +204,9 @@ def update_user(user_id: int, email: str, name: str, role: int, status: str) -> 
             old_status = current[3]
             deactivated = old_status == "active" and status == "deactive"
             revoked = sessions.delete_sessions_for_email(cur, email) if deactivated else 0
+
+            for action in _audit_actions_for_update(current, email, name, role, status):
+                audit_log.record(cur, actor_email, action, user_id, audit_log.RESULT_SUCCESS)
 
             conn.commit()
 

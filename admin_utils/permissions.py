@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from admin_utils import audit_log
 from db_utils.connection import get_ready_conn, sql
 from db_utils.schema import ADMIN_ROLE_ID
 
@@ -41,8 +42,9 @@ def get_permission(permission_id: int) -> dict | None:
         conn.close()
 
 
-def update_permission(permission_id: int, role: str, allowed_haiku: int) -> bool:
-    """回傳這次呼叫是否真的改到任何欄位。"""
+def update_permission(permission_id: int, role: str, allowed_haiku: int, *, actor_email: str) -> bool:
+    """回傳這次呼叫是否真的改到任何欄位。有改到的話，跟 UPDATE 同一個交易
+    記進管理操作紀錄；actor_email 是執行這個操作的管理員。"""
     conn, cur = get_ready_conn()
     try:
         cur.execute(
@@ -59,6 +61,7 @@ def update_permission(permission_id: int, role: str, allowed_haiku: int) -> bool
                 sql("UPDATE permissions SET role = ?, allowed_haiku = ? WHERE id = ?"),
                 (role, allowed_haiku, permission_id),
             )
+            audit_log.record(cur, actor_email, "permission.update", permission_id, audit_log.RESULT_SUCCESS)
             conn.commit()
         return changed
     finally:

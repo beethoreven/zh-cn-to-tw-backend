@@ -158,6 +158,17 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 - email 一律去掉前後空白、轉小寫再存（`auth_utils/whitelist.py` 的 `normalize_email`），授權快取的鍵也是；比對工作的擁有者也不分大小寫。原本 users 的唯一限制分大小寫、查詢卻不分，同一個人可以被建成兩筆只差大小寫的帳號；停用帳號時，大小寫不同還會清不到授權快取。啟動時把既有的 email 轉小寫，再加上不分大小寫的唯一索引 `users_email_lower_key`。已經有只差大小寫的重複帳號時不動、只在 log 留一行警告（不印 email），由管理員把重複的帳號改掉，下次啟動自動完成。這一段包在 savepoint 裡，萬一失敗也只撤銷這一段，不會讓服務停擺。
 - 停用帳號後，授權快取不會被寫回「啟用中」。原本有兩種交錯會讓停用的人在快取裡還是啟用中、最多 30 秒（`AUTH_CACHE_TTL_SECONDS`）內還能重新登入：清快取排在停用 commit 之前，commit 前進來的請求會查到舊資料、重新寫回快取；另一種是停用之前就開始查詢的請求，在清快取之後才把結果寫回去。現在清快取排在 commit 之後；每清一次快取就把一個計數加一，查詢前記下計數，寫回時計數變了就不寫（那次查詢的結果仍然回給它自己的請求）。兩種交錯都用真的 Postgres 重現過，改之前會失敗、改之後通過。
 
+### 管理操作紀錄：誰在什麼時候動過哪一筆
+
+管理員的寫入操作都會記進 `admin_audit_log` 表（`admin_utils/audit_log.py`）。每筆只有時間（UTC）、誰（登入的 email）、動作代碼、對象 id、結果五個欄位；刻意不記請求內容，所以名稱、email 這類欄位值、劇本、token、IP 都不會進來，要知道改成什麼去看資料本身。
+
+- 動作代碼：`user.create`、`user.update`（改 email 或名稱）、`user.role_change`、`user.deactivate`、`user.activate`、`permission.update`（角色名稱或額度）、`project.create`、`project.update`。一次儲存同時改了好幾種東西（例如降級又停用），每一種各記一筆，事後才查得到「誰停用了這個帳號」。儲存了但沒有任何欄位不同的，不記。
+- 結果：`success`；`failed` 是管理員發出、但沒成立的操作（欄位不合法、找不到對象、會讓系統沒有管理員、email 重複）；`denied` 是已登入但不是管理員（或帳號已停用）的人呼叫管理 API，讀取類的記成 `admin.view`。沒登入的請求不記：誰都能送，記下來只會讓任何人都能往這張表灌資料，也不知道是誰。
+- 成功的紀錄跟操作本身寫在同一個交易裡：操作 commit 了紀錄就一定在，操作失敗回滾了紀錄也跟著消失（用真的 Postgres 測過紀錄寫入失敗、以及紀錄寫入之後操作才失敗兩種情況）。`failed`／`denied` 沒有交易可搭，另外開連線寫，寫不進去只印 log，不會把原本的 401／400 變成 500。
+- 保留 180 天（`RETENTION_DAYS`），由既有的每小時清理迴圈刪掉更舊的。
+- 查詢：`GET /admin/audit-log`，只有管理員能叫，新的在前，`limit` 預設 100、最多 500，往前翻頁帶上一頁最後一筆的 `id` 當 `before_id`。
+- 強制更新門檻（`app_versions`）與桌面版公告（`ta-notice.txt`）沒有 API，是直接改資料庫或檔案，不經過這裡；後端也沒有刪除別人資料或匯出資料的 API。之後加這類 API，記得一起記進這張表。
+
 ### 建表與遷移：commit 之後才算完成
 
 `ensure_schema`（`db_utils/schema.py`）在每個行程第一次用到資料庫時建表、補欄位、跑遷移，跑完打開一個旗標，之後的請求直接跳過。原本旗標在 commit 之前就打開：第一個請求還在 commit 的時候進來的請求會跳過這段、去查別的連線還看不到的表而失敗；commit 要是失敗，旗標也已經打開，到行程重啟之前都不會再建一次，每個請求都會出錯。現在 commit 之後才打開旗標；失敗的那次也會關掉連線，把連線名額還回去（原本會少一個名額）。三種情況都用真的 Postgres 重現過，改之前會失敗、改之後通過。
@@ -180,7 +191,7 @@ pattern.txt               Stage 2 的預設範本（每次請求重讀）
 pipeline/orchestrator.py  Stage 1 的簡轉繁→潤飾 流程編排（不含 OCR，OCR 一律在使用者本機做）
 llm_utils/                Gemini/Claude 呼叫封裝
 usage/                    用量統計（Gemini 次數、Claude token/費用）
-admin_utils/              管理員介面（使用者/權限/專案管理）
+admin_utils/              管理員介面（使用者/權限/專案管理）與管理操作紀錄
 output_utils/             輸出成 .txt/.docx
 convert_utils/            OpenCC 簡轉繁
 validators/               輸出驗證（殘留簡體字檢查、LLM 輸出長度上限）
@@ -405,6 +416,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 - `GET /api/jobs/active` — 目前有幾個工作在跑（部署前檢查用，公開不需登入）
 - `GET /admin/users`、`/admin/permissions`、`/admin/projects` 等 — 管理員介面
+- `GET /admin/audit-log` — 管理操作紀錄（唯讀，新的在前，`limit`／`before_id` 翻頁）
 
 ---
 
@@ -564,6 +576,17 @@ All of this is on the backend, so it takes effect for every app version as soon 
 - Emails are trimmed and lowercased before being stored (`normalize_email` in `auth_utils/whitelist.py`), and so are the authorization-cache keys; job ownership is compared case-insensitively too. Previously the users unique constraint was case-sensitive while lookups weren't, so one person could end up with two accounts differing only in case, and deactivating an account could miss the authorization cache when the case differed. On startup, existing emails are lowercased and a case-insensitive unique index `users_email_lower_key` is added. If accounts differing only in case already exist, nothing is changed and only a warning is logged (without the emails); once an admin fixes the duplicates, the next start completes it. This step runs inside a savepoint, so if it fails only this step is rolled back and the service keeps running.
 - After an account is deactivated, the authorization cache can no longer be written back as "active". Two interleavings used to leave a deactivated user cached as active, able to sign in again for up to 30 seconds (`AUTH_CACHE_TTL_SECONDS`): the cache was cleared before the deactivation committed, so a request arriving before the commit read the old row and wrote it back; or a lookup that started before the deactivation wrote its result back after the cache was cleared. Now the cache is cleared after the commit, and every clear bumps a counter: a lookup records the counter before querying and skips the write-back if it changed (the result still goes back to its own request). Both interleavings were reproduced against a real Postgres; they fail before the change and pass after it.
 
+### Admin Audit Log: Who Touched Which Row, and When
+
+Every admin write is recorded in the `admin_audit_log` table (`admin_utils/audit_log.py`). Each row has only five fields: the time (UTC), who (the signed-in email), an action code, the target id, and the result. The request content is deliberately not stored, so field values such as names and emails, scripts, tokens and IPs never end up there; to see what something was changed to, look at the data itself.
+
+- Action codes: `user.create`, `user.update` (email or name changed), `user.role_change`, `user.deactivate`, `user.activate`, `permission.update` (role name or quota), `project.create`, `project.update`. When one save changes several kinds of things (say, a demotion plus a deactivation), each kind gets its own row, so "who deactivated this account" can be answered later. A save in which no field actually differs is not recorded.
+- Results: `success`; `failed` is an operation an admin sent that didn't go through (invalid fields, target not found, it would leave the system without an admin, duplicate email); `denied` is someone signed in but not an admin (or whose account is deactivated) calling an admin API, with read endpoints recorded as `admin.view`. Requests that aren't signed in are not recorded: anyone can send them, so recording them would let anyone fill this table, and it wouldn't say who.
+- A success row is written in the same transaction as the operation itself: if the operation commits, its row is there; if the operation fails and rolls back, the row goes with it (tested against a real Postgres both for the log insert failing and for the operation failing after the log row was written). `failed`/`denied` rows have no transaction to join, so they are written on their own connection; if that fails, it is only logged, and the original 401/400 never turns into a 500.
+- Rows are kept for 180 days (`RETENTION_DAYS`); the existing hourly cleanup loop deletes older ones.
+- Reading: `GET /admin/audit-log`, admins only, newest first; `limit` defaults to 100 with a maximum of 500, and to page back, pass the last row's `id` from the previous page as `before_id`.
+- The forced-update thresholds (`app_versions`) and the desktop notice (`ta-notice.txt`) have no API: they are changed directly in the database or the file and don't pass through here. The backend also has no API that deletes other people's data or exports data. Any such API added later should record into this table too.
+
 ### Schema Setup Counts as Done Only After It Commits
 
 `ensure_schema` (`db_utils/schema.py`) creates tables, adds columns, and runs migrations the first time each process touches the database, then sets a flag so later requests skip it. The flag used to be set before the commit: a request arriving while the first one was still committing skipped the setup and queried tables that other connections couldn't see yet, and failed; and if the commit failed, the flag was already set, so the setup never ran again until the process restarted and every request errored. Now the flag is set only after the commit, and the failed attempt also closes its connection so the connection slot is returned (it used to be lost). All three cases were reproduced against a real Postgres; they fail before the change and pass after it.
@@ -586,7 +609,7 @@ pattern.txt               Stage 2's default template (re-read on every request)
 pipeline/orchestrator.py  Stage 1's conversion→polish orchestration (no OCR; OCR always runs on the user's machine)
 llm_utils/                Gemini/Claude call wrappers
 usage/                    usage tracking (Gemini call counts, Claude tokens/cost)
-admin_utils/              admin interface (users/permissions/projects)
+admin_utils/              admin interface (users/permissions/projects) and the admin audit log
 output_utils/             .txt/.docx export
 convert_utils/            OpenCC Simplified→Traditional conversion
 validators/               output validation (leftover-Simplified-character checks, the LLM output length cap)
@@ -817,3 +840,4 @@ The `app_versions` table's unique key is `(os, os_version)`, not `os` alone — 
 
 - `GET /api/jobs/active` — how many jobs are currently running (for pre-deploy checks, no auth required)
 - `GET /admin/users`, `/admin/permissions`, `/admin/projects`, etc. — admin interface
+- `GET /admin/audit-log` — admin audit log (read-only, newest first, paged with `limit`/`before_id`)

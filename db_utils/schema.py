@@ -10,6 +10,8 @@
 6. jobs（Stage 1/2 工作狀態）
 7. app_versions（桌面版 App 強制更新門檻）——沒有 FK 依賴，順序其實
    不重要，放最後只是照加入的時間排
+8. admin_audit_log（管理操作紀錄）——同樣沒有 FK 依賴：對象被刪掉之後
+   紀錄還是要留著，所以 actor 存 email、對象只存 id，不設外鍵
 
 只支援 Postgres（Neon），不再有 SQLite 模式——見 db_utils/connection.py。
 
@@ -80,6 +82,7 @@ def ensure_schema(cur) -> None:
         _ensure_sessions(cur)
         _ensure_jobs(cur)
         _ensure_app_versions(cur)
+        _ensure_admin_audit_log(cur)
 
         # 先 commit 再打開旗標。反過來的話，從旗標打開到 commit 之間，其他
         # 執行緒會跳過這段、直接去查還沒 commit 的表（別的連線看不到，查詢
@@ -340,3 +343,23 @@ def _ensure_app_versions(cur) -> None:
     # 資料，這段「查無就補」的判斷條件從此永遠成立，變成每次 backend
     # 啟動都會憑空重新種出一筆過期、沒有任何 client 會查到的
     # (macos, '13+', ...) 死資料（2026-08-21 發現、移除）。
+
+
+def _ensure_admin_audit_log(cur) -> None:
+    # 欄位刻意只有這幾個，不存請求內容，見 admin_utils/audit_log.py。
+    # created_at 跟 sessions 一樣存 UTC ISO 字串，清理時直接比字串。
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            actor_email TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_id BIGINT,
+            result TEXT NOT NULL CHECK (result IN ('success', 'denied', 'failed'))
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created ON admin_audit_log(created_at)"
+    )
