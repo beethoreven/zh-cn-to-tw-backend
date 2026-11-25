@@ -6,7 +6,7 @@
 2. users（帳號）——projects.owner_1/2/3 會參照這裡的 id
 3. projects
 4. usage_log（用量記錄表）
-5. sessions（應用程式自己簽發的登入 session）
+5. login_sessions（應用程式自己簽發的登入 session，只存 token 的雜湊）
 6. jobs（Stage 1/2 工作狀態）
 7. app_versions（桌面版 App 強制更新門檻）——沒有 FK 依賴，順序其實
    不重要，放最後只是照加入的時間排
@@ -237,20 +237,47 @@ def _ensure_usage_log(cur) -> None:
 
 def _ensure_sessions(cur) -> None:
     # 應用程式自己簽發的登入 session（跟 Google ID Token 脫鉤，效期由
-    # auth_utils/sessions.py 的滑動視窗機制管理，不是 Google 那邊固定的
-    # 1 小時）——token 是隨機不透明字串，不是 JWT，這裡只需要能用它反查
-    # email。
+    # auth_utils/sessions.py 管理，不是 Google 那邊固定的 1 小時）。只存
+    # token 的 SHA-256，不存原文，理由見 auth_utils/sessions.py 開頭。
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS login_sessions (
+            token_hash TEXT PRIMARY KEY,
             email TEXT NOT NULL,
             created_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_login_sessions_last_seen ON login_sessions(last_seen_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_login_sessions_created ON login_sessions(created_at)")
+    _migrate_plaintext_sessions(cur)
+
+
+def _migrate_plaintext_sessions(cur) -> None:
+    """舊的 sessions 表存的是 token 原文。把每一筆換成雜湊搬進
+    login_sessions，再把舊表整張刪掉：已經登入的人不用重新登入，資料庫裡
+    也不再留著能直接拿來登入的值。
+
+    每次啟動都跑（舊表不在就什麼都不做）：部署切換的那幾秒，還沒停的舊
+    行程可能又往舊表寫了新登入，下一次啟動會把它們一起搬過來。"""
+    cur.execute("SELECT to_regclass('public.sessions')")
+    if cur.fetchone()[0] is None:
+        return
+    # 放在函式裡 import：auth_utils.sessions 會 import db_utils.connection，
+    # 放在檔案開頭會跟 schema 的載入順序繞成循環。
+    from auth_utils.sessions import hash_token
+
+    cur.execute("SELECT token, email, created_at, last_seen_at FROM sessions")
+    rows = cur.fetchall()
+    for token, email, created_at, last_seen_at in rows:
+        cur.execute(
+            "INSERT INTO login_sessions (token_hash, email, created_at, last_seen_at) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (token_hash) DO NOTHING",
+            (hash_token(token), email, created_at, last_seen_at),
+        )
+    cur.execute("DROP TABLE sessions")
+    print(f"[schema] 已把 {len(rows)} 筆 session 換成雜湊存放，舊的 sessions 表已刪除", flush=True)
 
 
 def _ensure_jobs(cur) -> None:

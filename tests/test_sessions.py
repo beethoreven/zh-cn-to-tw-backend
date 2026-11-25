@@ -1,0 +1,164 @@
+"""Login sessions: hashed storage, idle and absolute expiry, log out everywhere,
+and moving an old plaintext sessions table — through the real app.py."""
+import contextlib
+import io
+import itertools
+from datetime import datetime, timedelta, timezone
+
+import harness
+from harness import check
+
+harness.reset_database()
+
+from db_utils import connection as _conn  # noqa: E402
+
+_c, _ = _conn.get_ready_conn()
+_c.close()
+import app as backend_app  # noqa: E402
+from admin_utils import users as admin_users  # noqa: E402
+from auth_utils import sessions  # noqa: E402
+from db_utils import schema  # noqa: E402
+
+client = backend_app.app.test_client()
+ORIGIN = "zhcntotw://app"
+_ips = itertools.count(1)
+
+
+def hdr(token=None):
+    n = next(_ips)
+    h = {"Origin": ORIGIN, "CF-Connecting-IP": f"198.51.{n // 250}.{n % 250 + 1}"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+def db(query, params=()):
+    conn = harness.raw_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    out = cur.fetchall() if cur.description else None
+    conn.commit()
+    conn.close()
+    return out
+
+
+def ago(days):
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+admin_users.create_user("a@example.com", "A", 1, "active", actor_email="seed@test")
+admin_users.create_user("b@example.com", "B", 2, "active", actor_email="seed@test")
+
+# ---------------------------------------------------------------- A. hashed storage
+print("== A. only the hash is stored")
+tok = sessions.create_session("a@example.com")
+stored = db("SELECT token_hash, email FROM login_sessions")
+check("one row stored", len(stored) == 1, stored)
+check("the stored value is not the token", stored[0][0] != tok)
+check("the stored value is its SHA-256", stored[0][0] == sessions.hash_token(tok))
+check("no column anywhere holds the token",
+      not db("SELECT 1 FROM login_sessions WHERE token_hash = %s OR email = %s", (tok, tok)))
+check("token resolves", sessions.resolve_session(tok) == "a@example.com")
+check("the stored hash itself does not work as a token", sessions.resolve_session(stored[0][0]) is None)
+r = client.get("/auth/status", headers=hdr(tok))
+check("/auth/status accepts the token", r.status_code == 200 and r.get_json()["email"] == "a@example.com", r.get_json())
+check("old plaintext sessions table is gone", db("SELECT to_regclass('public.sessions')")[0][0] is None)
+
+# ---------------------------------------------------------------- B. expiry
+print("== B. idle and absolute expiry")
+fresh_old = sessions.create_session("a@example.com")
+db("UPDATE login_sessions SET created_at = %s WHERE token_hash = %s",
+   (ago(sessions.SESSION_MAX_DAYS + 1), sessions.hash_token(fresh_old)))
+check("in daily use but older than the absolute limit: rejected", sessions.resolve_session(fresh_old) is None)
+check("...and its row deleted",
+      not db("SELECT 1 FROM login_sessions WHERE token_hash = %s", (sessions.hash_token(fresh_old),)))
+
+young = sessions.create_session("a@example.com")
+db("UPDATE login_sessions SET created_at = %s WHERE token_hash = %s",
+   (ago(sessions.SESSION_MAX_DAYS - 1), sessions.hash_token(young)))
+check("just inside the absolute limit: still works", sessions.resolve_session(young) == "a@example.com")
+
+idle = sessions.create_session("a@example.com")
+db("UPDATE login_sessions SET last_seen_at = %s WHERE token_hash = %s",
+   (ago(sessions.SESSION_IDLE_DAYS + 1), sessions.hash_token(idle)))
+check("idle too long: rejected", sessions.resolve_session(idle) is None)
+
+# cleanup loop: one idle, one too old, one fine
+c_idle = sessions.create_session("b@example.com")
+c_old = sessions.create_session("b@example.com")
+c_ok = sessions.create_session("b@example.com")
+db("UPDATE login_sessions SET last_seen_at = %s WHERE token_hash = %s",
+   (ago(sessions.SESSION_IDLE_DAYS + 1), sessions.hash_token(c_idle)))
+db("UPDATE login_sessions SET created_at = %s WHERE token_hash = %s",
+   (ago(sessions.SESSION_MAX_DAYS + 1), sessions.hash_token(c_old)))
+deleted = sessions.delete_idle_sessions()
+left = {r[0] for r in db("SELECT token_hash FROM login_sessions WHERE email = 'b@example.com'")}
+check("cleanup deletes both the idle and the too-old session", deleted == 2, deleted)
+check("cleanup keeps the live one", left == {sessions.hash_token(c_ok)}, left)
+
+# ---------------------------------------------------------------- C. log out everywhere
+print("== C. log out everywhere")
+db("DELETE FROM login_sessions")
+a1 = sessions.create_session("a@example.com")
+a2 = sessions.create_session("a@example.com")
+a_mixed = sessions.create_session("A@Example.com")  # a session stored with different casing
+b1 = sessions.create_session("b@example.com")
+r = client.post("/auth/logout-all", headers=hdr())
+check("no token: 401", r.status_code == 401)
+r = client.post("/auth/logout-all", headers=hdr("f" * 64))
+check("unknown token: 401", r.status_code == 401)
+r = client.post("/auth/logout-all", headers=hdr(a1))
+check("200 with the revoked count", r.status_code == 200 and r.get_json() == {"status": "ok", "revoked": 3}, r.get_json())
+check("the calling device is logged out", sessions.resolve_session(a1) is None)
+check("the other device is logged out", sessions.resolve_session(a2) is None)
+check("the differently-cased session is logged out", sessions.resolve_session(a_mixed) is None)
+check("another user is untouched", sessions.resolve_session(b1) == "b@example.com")
+r = client.get("/auth/status", headers=hdr(a2))
+check("/auth/status on a revoked device: 401", r.status_code == 401)
+
+# deactivated account can still revoke its own sessions
+d = admin_users.create_user("d@example.com", "D", 2, "active", actor_email="seed@test")
+d_tok = sessions.create_session("d@example.com")
+db("UPDATE users SET status = 'deactive' WHERE id = %s", (d["id"],))
+from auth_utils import whitelist  # noqa: E402
+
+whitelist.invalidate_cache("d@example.com")
+r = client.post("/auth/logout-all", headers=hdr(d_tok))
+check("a deactivated account can still log out everywhere", r.status_code == 200 and r.get_json()["revoked"] == 1, r.get_json())
+
+# ---------------------------------------------------------------- D. moving an old plaintext table
+print("== D. migration from the plaintext sessions table")
+OLD_TOKENS = ["1" * 64, "2" * 64]
+now = datetime.now(timezone.utc).isoformat()
+db("""CREATE TABLE sessions (token TEXT PRIMARY KEY, email TEXT NOT NULL,
+                             created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)""")
+db("INSERT INTO sessions VALUES (%s, 'a@example.com', %s, %s), (%s, 'b@example.com', %s, %s)",
+   (OLD_TOKENS[0], now, now, OLD_TOKENS[1], now, now))
+# a row that was already moved (e.g. both old and new process ran during a deploy)
+db("INSERT INTO login_sessions VALUES (%s, 'a@example.com', %s, %s)", (sessions.hash_token(OLD_TOKENS[0]), now, now))
+schema._schema_ready = False
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    c3, _ = _conn.get_ready_conn()
+    c3.close()
+check("migration logs how many rows it moved", "2 筆" in out.getvalue(), out.getvalue())
+check("old table dropped", db("SELECT to_regclass('public.sessions')")[0][0] is None)
+check("users logged in before the change stay logged in",
+      [sessions.resolve_session(t) for t in OLD_TOKENS] == ["a@example.com", "b@example.com"])
+check("no plaintext token left in the database",
+      not db("SELECT 1 FROM login_sessions WHERE token_hash = ANY(%s)", (OLD_TOKENS,)))
+schema._schema_ready = False
+c4, _ = _conn.get_ready_conn()
+c4.close()
+check("running schema setup again with no old table is a no-op", schema._schema_ready)
+
+# ---------------------------------------------------------------- E. logout of one device
+print("== E. single logout")
+e1 = sessions.create_session("b@example.com")
+e2 = sessions.create_session("b@example.com")
+r = client.post("/auth/logout", headers=hdr(e1))
+check("logout 200", r.status_code == 200)
+check("that device is logged out", sessions.resolve_session(e1) is None)
+check("the other device stays logged in", sessions.resolve_session(e2) == "b@example.com")
+
+raise SystemExit(0 if harness.summary("sessions") else 1)

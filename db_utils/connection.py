@@ -1,7 +1,7 @@
 """
 全站共用的資料庫連線層。
 
-usage_log、users、permissions、projects、sessions 這幾張表都走這裡，
+usage_log、users、permissions、projects、login_sessions 這幾張表都走這裡，
 所有需要碰資料庫的模組（usage/、admin_utils/、auth_utils/）共用同一套
 連線邏輯，不要每個模組各自複製一份。
 

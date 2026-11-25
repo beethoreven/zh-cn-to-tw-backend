@@ -118,7 +118,7 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 ### 登入：Google ID Token 只換一次 session，並比對 nonce
 
-`POST /auth/login` 是唯一收 Google ID Token 的地方：驗證簽章、效期、audience 之後換發應用程式自己的 session token，之後的 API 一律帶 session token（Google 的 token 只活約一小時，拿來當長效憑證，長時間的工作會在中途被登出，見 `auth_utils/sessions.py`）。
+`POST /auth/login` 是唯一收 Google ID Token 的地方：驗證簽章、效期、audience 之後換發應用程式自己的 session token，之後的 API 一律帶 session token（Google 的 token 只活約一小時，拿來當長效憑證，長時間的工作會在中途被登出，見 `auth_utils/sessions.py`）。資料庫只存 session token 的 SHA-256，不存原文：備份或查詢結果外流時，拿到的值不能直接拿來登入。session 閒置 `SESSION_IDLE_DAYS` 天、或建立滿 `SESSION_MAX_DAYS` 天（不管多常用）就失效；後者讓被偷走的 token 能用的時間有上限。
 
 換發之前另外比對 nonce，確認這個 token 是送來的這個 App 自己登入拿到的。桌面殼每次登入產生一個隨機原值，只留在 App 裡；Google 登入網址帶的是原值的 SHA-256（base64url、不帶 `=`），Google 把它原樣放進 ID Token 的 `nonce` 欄位；登入成功後，網頁把 token 跟原值一起送來，後端算一次雜湊比對（`auth_utils/auth.py` 的 `nonce_is_acceptable`）。token 會經過系統瀏覽器跟本機的登入回呼，原值不會，所以只拿到 token 的人換不到 session。刻意不直接比對 token 裡的 nonce：那個值寫在 token 裡、誰都讀得到，照抄送來就能通過，等於沒有檢查。
 
@@ -380,6 +380,7 @@ curl https://<你的部署網址>/api/jobs/active
 | `GEMINI_3_5_FLASH_LITE_RPD_LIMIT` | `500` | Gemini 3.5 Flash Lite 每日呼叫次數上限 |
 | `GEMINI_3_1_FLASH_LITE_RPD_LIMIT` | `500` | Gemini 3.1 Flash Lite 每日呼叫次數上限 |
 | `SESSION_IDLE_DAYS` | `90` | 登入 session 閒置幾天後失效 |
+| `SESSION_MAX_DAYS` | `180` | 登入 session 建立幾天後一定失效（不管多常用） |
 | `AUTH_CACHE_TTL_SECONDS` | `30` | 權限查詢結果快取幾秒 |
 | `FLASK_DEBUG` | `false` | 本機除錯模式，正式環境不要開 |
 | `REFINE_MAX_OUTPUT_RATIO` | `1.1` | Stage 1 潤飾與 Stage 3 前置處理的輸出字數（不算空白）超過原文的這個比例就不採用 |
@@ -406,6 +407,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 - `POST /auth/login` — body `{"id_token": "<Google ID Token>", "nonce": "<原值>"}`，換發 session token。`nonce` 只有新版桌面殼會帶，舊版不帶也能登入（見專案報告「登入」一節）。
 - `POST /auth/logout` — 刪掉這個 session token。
+- `POST /auth/logout-all` — 刪掉這個帳號在所有裝置上的 session（要帶有效的 session token；帳號被停用也能用）。
 - `GET /auth/status` — 查 session 是否有效、帳號是否獲授權、是不是管理員。
 
 ### 版本檢查
@@ -563,7 +565,7 @@ This feature grew out of a real manual workflow: applying a "before → after" l
 
 ### Sign-In: a Google ID Token Is Exchanged for a Session Once, and Its Nonce Is Checked
 
-`POST /auth/login` is the only place that accepts a Google ID Token: after verifying the signature, expiry and audience, it issues the application's own session token, and every later API call carries that instead (Google's token only lives about an hour; used as a long-lived credential, long jobs would be signed out halfway through — see `auth_utils/sessions.py`).
+`POST /auth/login` is the only place that accepts a Google ID Token: after verifying the signature, expiry and audience, it issues the application's own session token, and every later API call carries that instead (Google's token only lives about an hour; used as a long-lived credential, long jobs would be signed out halfway through — see `auth_utils/sessions.py`). The database stores only the SHA-256 of a session token, never the token itself: a leaked backup or query result cannot be used to sign in. A session expires after `SESSION_IDLE_DAYS` days without use, or `SESSION_MAX_DAYS` days after it was created however often it is used; the latter caps how long a stolen token stays usable.
 
 Before issuing a session it also checks the nonce, to confirm the token was obtained by this app's own sign-in. Each time the desktop shell signs in, it generates a random raw value that stays inside the app; the Google sign-in URL carries the raw value's SHA-256 (base64url, no `=`), which Google copies verbatim into the ID Token's `nonce` claim; after sign-in, the page sends the token together with the raw value, and the backend hashes and compares (`nonce_is_acceptable` in `auth_utils/auth.py`). The token passes through the system browser and the local sign-in callback, but the raw value does not, so someone who only obtains the token cannot exchange it for a session. Comparing the token's nonce directly was deliberately not done: that value is inside the token, readable by anyone, so copying it into the request would always pass — no check at all.
 
@@ -828,6 +830,7 @@ Every other variable has a default (in `configs/config.py`, a few in their own m
 | `GEMINI_3_5_FLASH_LITE_RPD_LIMIT` | `500` | Daily call limit for Gemini 3.5 Flash Lite |
 | `GEMINI_3_1_FLASH_LITE_RPD_LIMIT` | `500` | Daily call limit for Gemini 3.1 Flash Lite |
 | `SESSION_IDLE_DAYS` | `90` | Days of inactivity before a login session expires |
+| `SESSION_MAX_DAYS` | `180` | Days after creation when a login session always expires, however often it is used |
 | `AUTH_CACHE_TTL_SECONDS` | `30` | Seconds a permission lookup is cached |
 | `FLASK_DEBUG` | `false` | Local debug mode; do not enable in production |
 | `REFINE_MAX_OUTPUT_RATIO` | `1.1` | Stage 1 refinement / Stage 3 preprocessing output whose character count (whitespace excluded) exceeds this ratio of the original is discarded |
@@ -857,6 +860,7 @@ too frequent returns 429 with `Retry-After`; both bodies are
 
 - `POST /auth/login` — body `{"id_token": "<Google ID Token>", "nonce": "<raw value>"}`; issues a session token. Only new desktop shells send `nonce`; older ones can still sign in without it (see the Project Report's "Sign-In" section).
 - `POST /auth/logout` — deletes this session token.
+- `POST /auth/logout-all` — deletes this account's sessions on every device (needs a valid session token; works even for a deactivated account).
 - `GET /auth/status` — whether the session is valid, whether the account is authorized, and whether it's an admin.
 
 ### Version Check

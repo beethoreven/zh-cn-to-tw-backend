@@ -347,8 +347,8 @@ def auth_login():
     session token。
 
     Google ID Token 只在這裡驗證這一次（簽章/過期時間/audience），驗證
-    通過、且 email 在白名單裡，就簽發一個 session token 存進 sessions
-    表，回傳給前端存起來，之後所有 API 呼叫都改帶這個 session token，
+    通過、且 email 在白名單裡，就簽發一個 session token（資料庫只存它的
+    雜湊），回傳給前端存起來，之後所有 API 呼叫都改帶這個 session token，
     不再是 Google ID Token 本身——Google 那個效期固定約 1 小時，拿它
     當長效憑證會讓工作階段每小時被打斷一次，這是這個 session token
     層存在的原因，細節說明見 auth_utils/sessions.py 開頭的註解。
@@ -388,6 +388,19 @@ def auth_logout():
     token = auth.extract_bearer_token(request)
     sessions.delete_session(token)
     return jsonify({"status": "ok"}), 200
+
+
+@app.post("/auth/logout-all")
+def auth_logout_all():
+    """登出所有裝置：這個帳號在每一台電腦上的 session 全部刪掉，包含發出
+    這個請求的這一台。要帶有效的 session token 才知道是哪個帳號；不檢查
+    白名單——帳號被停用的人也應該能撤掉自己的登入。"""
+    token = auth.extract_bearer_token(request)
+    email = sessions.resolve_session(token)
+    if email is None:
+        return jsonify({"error": "登入已逾期或已登出，請重新登入"}), 401
+    count = sessions.delete_all_sessions_for_email(email)
+    return jsonify({"status": "ok", "revoked": count}), 200
 
 
 @app.get("/auth/status")
