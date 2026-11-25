@@ -195,6 +195,8 @@ admin_utils/              管理員介面（使用者/權限/專案管理）與�
 output_utils/             輸出成 .txt/.docx
 convert_utils/            OpenCC 簡轉繁
 validators/               輸出驗證（殘留簡體字檢查、LLM 輸出長度上限）
+tests/                    測試（真的 Postgres、真的 app.py；不連正式資料庫、不呼叫 LLM）
+.github/workflows/        每次推送跑 tests/ 的 GitHub Actions（只跑測試，不部署）
 ```
 
 ### 已知限制
@@ -286,6 +288,31 @@ WEB_API_BASE_OVERRIDE=http://localhost:5001 WEB_BASE_URL_OVERRIDE=http://localho
 ```
 
 這樣登入（系統瀏覽器拿到的 Google token 會送到本機 backend 驗證）、Stage 1、Stage 2 都會走本機的程式碼，不用先部署。Windows 的做法見 `zh-cn-to-tw-windows` 的 README「Part B. 本機執行」。
+
+### 7. 跑測試
+
+測試在 `tests/`，每一支都是獨立的腳本，會匯入真的 `app.py`、連真的 Postgres，但絕對不碰正式環境：
+
+- 開頭就關掉 `.env` 的載入。`load_dotenv()` 會從目前目錄往上找 `.env`，在這個資料夾裡跑就會讀到你的正式金鑰；測試在匯入任何後端模組之前就把它換掉。
+- 資料庫用 `TEST_DATABASE_URL`，而且只接受指向 `localhost`／`127.0.0.1` 的網址，其他一律拒絕。沒設的話，改用 `pgserver` 套件在 `tests/.pgdata` 起一個內嵌的 Postgres（這個資料夾不進版控）。每一支測試開頭都會把資料庫整個清空，所以不要指向任何有資料的資料庫。
+- LLM 金鑰是假的；要呼叫 Gemini／Claude 的地方都換成本機的假回應，不會花錢。
+
+最簡單的跑法（用內嵌的 Postgres）：
+
+```bash
+pip install pgserver
+python tests/run_all.py
+```
+
+已經有本機 Postgres 的話：
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres python tests/run_all.py
+```
+
+`run_all.py` 會一支一支用獨立的行程跑，最後列出失敗的檔案，有任何一支失敗就回傳非零。資料庫的編碼要是 UTF8（測試資料有中文；用 `initdb` 自己建的話記得加 `-E UTF8`）。
+
+推到 GitHub 時，`.github/workflows/tests.yml` 會用 Postgres 18（跟正式的 Neon 同一個大版本）的服務容器跑同一組測試。它只跑測試、不部署：部署照舊是 Render 監看 `main`，測試失敗不會擋住部署，所以推之前還是要先在本機跑過。
 
 ## Part B. 部署到 Render
 
@@ -613,6 +640,8 @@ admin_utils/              admin interface (users/permissions/projects) and the a
 output_utils/             .txt/.docx export
 convert_utils/            OpenCC Simplified→Traditional conversion
 validators/               output validation (leftover-Simplified-character checks, the LLM output length cap)
+tests/                    tests (a real Postgres and the real app.py; never the production database, never an LLM)
+.github/workflows/        GitHub Actions that run tests/ on every push (tests only, no deploy)
 ```
 
 ### Known Limitations
@@ -706,6 +735,31 @@ WEB_API_BASE_OVERRIDE=http://localhost:5001 WEB_BASE_URL_OVERRIDE=http://localho
 ```
 
 This way sign-in (the Google token obtained by the system browser is verified by the local backend), Stage 1 and Stage 2 all run through your local code, with no deploy needed first. For Windows, see "Part B. Running Locally" in `zh-cn-to-tw-windows`'s README.
+
+### 7. Run the Tests
+
+The tests live in `tests/`. Each one is a standalone script that imports the real `app.py` and talks to a real Postgres, but never touches production:
+
+- `.env` loading is switched off first. `load_dotenv()` searches upward from the current directory, so running from this folder would read your production keys; the tests replace it before importing any backend module.
+- The database comes from `TEST_DATABASE_URL`, which must point at `localhost`/`127.0.0.1`; anything else is refused. If it isn't set, the `pgserver` package starts an embedded Postgres under `tests/.pgdata` (that folder isn't committed). Every test file wipes the whole database first, so never point it at a database that holds data.
+- The LLM keys are fake, and every Gemini/Claude call is replaced with a local fake response, so nothing costs money.
+
+The simplest way (embedded Postgres):
+
+```bash
+pip install pgserver
+python tests/run_all.py
+```
+
+If you already have a local Postgres:
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres python tests/run_all.py
+```
+
+`run_all.py` runs the files one by one, each in its own process, lists the ones that failed at the end, and exits non-zero if any did. The database encoding must be UTF8 (the test data contains Chinese; if you create one with `initdb` yourself, add `-E UTF8`).
+
+On every push to GitHub, `.github/workflows/tests.yml` runs the same tests against a Postgres 18 service container (the same major version as the production Neon database). It only runs tests and never deploys: deploys still come from Render watching `main`, and a failing run doesn't block a deploy, so run the tests locally before pushing.
 
 ## Part B. Deploy to Render
 

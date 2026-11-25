@@ -1,0 +1,42 @@
+# 每次推送與 PR 都跑 tests/ 底下的全部測試。只跑測試，不部署：
+# 部署照舊由 Render 監看 main 處理，這裡失敗不會擋住部署。
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # 測試只接受指向 localhost 的資料庫，見 tests/harness.py
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      # 第三方 action 釘在 commit SHA，tag 被移動也不會換成別的程式碼
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements.txt
+      - name: Run tests
+        run: python tests/run_all.py
