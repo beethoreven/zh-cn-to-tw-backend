@@ -333,10 +333,10 @@ def _ensure_app_versions(cur) -> None:
     cur.execute("ALTER TABLE app_versions ALTER COLUMN os_version SET NOT NULL")
 
     # 這張表刻意不在這裡自動補種子資料。version_check API（見 app.py）
-    # 對查無門檻資料的 (os, os_version) 組合本來就設計成一律不擋
-    # （force_update: False），完全沒有資料不影響任何人；每個分流的
-    # 門檻要有意義的值時，出版時直接手動 INSERT/UPDATE 這張表，不要在
-    # 這裡自動生。
+    # 在整張表是空的時候不擋任何人；表裡有資料之後，只認表裡有的
+    # (os, os_version) 組合，其他一律強制更新。所以每個正式版會送的
+    # 組合都要有一列，新增分流時先 INSERT 這張表再發版，不要在這裡
+    # 自動生。
     #
     # 這裡曾經有一段「查無 os_version='13+' 就自動種一筆預設值
     # (1.0, 1.0)」的邏輯，是最早從「每個 os 一列」升級成 (os,

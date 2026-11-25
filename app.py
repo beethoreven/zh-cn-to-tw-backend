@@ -305,30 +305,58 @@ def version_check():
     因為 session 剛好過期就連「該不該更新」這個問題都問不到。
 
     版本號用 major/minor 兩個整數比較，不比字串（字串排序會把 "0.9"
-    排在 "0.10" 後面，比較邏輯本身就是錯的）。查無這個 os 的門檻資料
-    時一律不擋——資料庫暫時查不到不該變成擋住使用者工作的理由，門檻
-    表本來就是「有資料才擋、沒資料不擋」的設計。
+    排在 "0.10" 後面，比較邏輯本身就是錯的）。
 
     同一個 os 可能同時有好幾包各自獨立發版的桌面 build（例如 macOS 11+
     跟 10.15 各一包，見 db_utils/schema.py 的 app_versions 說明），
-    os_version 這個參數就是用來指定「我是哪一包」——省略時預設
-    '11+'，讓還沒帶這個新參數的舊 client 行為不變。
+    os_version 這個參數就是用來指定「我是哪一包」。
+
+    只認門檻表裡有的 (os, os_version) 組合。參數缺漏、格式不對、或組合
+    不在表裡，一律回 force_update：正式版送的值都在表裡，送錯的不是有
+    bug 的舊版就是被改過的 client，放行等於讓它繞過強制更新。前端只看
+    force_update，所以錯誤回應也要帶上它；狀態碼一律 200，舊前端若先檢查
+    狀態碼，非 200 會被當成查詢失敗而放行。
+
+    只有「讀不到門檻」時不擋：資料庫暫時有問題不該變成擋住使用者工作的
+    理由（讀取失敗沿用上一份快取，從來沒讀成功過才會走到這裡），表整張
+    是空的也視為還沒設定門檻。
     """
     os_name = request.args.get("os", "").strip().lower()
-    os_version = request.args.get("os_version", "11+").strip()
+    os_version = request.args.get("os_version", "").strip()
     major_raw = request.args.get("major")
     minor_raw = request.args.get("minor")
 
-    if not os_name or major_raw is None or minor_raw is None:
-        return jsonify({"error": "缺少 os/major/minor 參數"}), 400
+    try:
+        policies = app_versions.get_policies()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[version_check] 讀不到門檻，這次不擋：{exc}", flush=True)
+        return jsonify({"force_update": False})
+    if not policies:
+        return jsonify({"force_update": False})
+
+    def reject(reason: str):
+        # 不知道這個 client 該對照哪一列，最低版本就報表裡最高的那個
+        strictest = max(policies.values(), key=lambda p: (p["min_major"], p["min_minor"]))
+        return jsonify(
+            {
+                "force_update": True,
+                "error": reason,
+                "latest_version": f"{strictest['latest_major']}.{strictest['latest_minor']}",
+                "min_version": f"{strictest['min_major']}.{strictest['min_minor']}",
+                "update_url": _UPDATE_URL,
+            }
+        )
+
+    if not os_name or not os_version or major_raw is None or minor_raw is None:
+        return reject("缺少 os/os_version/major/minor 參數")
     try:
         major, minor = int(major_raw), int(minor_raw)
     except ValueError:
-        return jsonify({"error": "major/minor 必須是整數"}), 400
+        return reject("major/minor 必須是整數")
 
-    policy = app_versions.get_policy(os_name, os_version)
+    policy = policies.get((os_name, os_version))
     if policy is None:
-        return jsonify({"force_update": False})
+        return reject("不認得的 os/os_version")
 
     force_update = (major, minor) < (policy["min_major"], policy["min_minor"])
     return jsonify(

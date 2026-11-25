@@ -181,6 +181,10 @@ check("/api/jobs/active counts in-memory jobs without the DB", r.get_json().get(
       (r.data, n))
 job_store._active_sources.pop()
 
+app_versions._cached_at = None
+r = client.get("/api/version_check?os=macos&os_version=windows&major=1&minor=0", headers=ip)
+check("an empty threshold table blocks nobody", r.get_json().get("force_update") is False, r.data)
+
 conn = harness.raw_conn()
 cur = conn.cursor()
 cur.execute("INSERT INTO app_versions (os, os_version, latest_major, latest_minor, min_major, min_minor) "
@@ -198,6 +202,16 @@ for i in range(40):
 check("40 more checks with varying parameters: no DB connection", total == 0, total)
 r, n = connections_for(lambda: client.get("/api/version_check?os=windows&os_version=default&major=2&minor=0", headers=ip))
 check("cached thresholds still answer correctly", r.get_json().get("force_update") is True and n == 0, r.data)
+for label, qs in [
+    ("an unknown os/os_version combination", "os=macos&os_version=windows&major=9&minor=9"),
+    ("a missing os_version", "os=macos&major=9&minor=9"),
+    ("missing major/minor", "os=windows&os_version=default"),
+    ("a non-integer version", "os=windows&os_version=default&major=x&minor=1"),
+]:
+    r = client.get(f"/api/version_check?{qs}", headers=ip)
+    body = r.get_json()
+    check(f"{label} is forced to update with status 200", r.status_code == 200 and body["force_update"] is True
+          and body["min_version"] == "2.1", (r.status_code, r.data))
 app_versions._cached_at = time.monotonic() - 3600
 r, n = connections_for(lambda: client.get("/api/version_check?os=macos&os_version=11%2B&major=2&minor=2", headers=ip))
 check("after the cache expires it reloads once", n == 1 and r.get_json()["force_update"] is False, (n, r.data))
@@ -231,20 +245,25 @@ def ordered_load():
 app_versions._cached_at = time.monotonic() - 3600
 app_versions._load_all = ordered_load
 slow_result = []
-t = _threading.Thread(target=lambda: slow_result.append(app_versions.get_policy("macos", "11+")))
+t = _threading.Thread(target=lambda: slow_result.append(app_versions.get_policies()[("macos", "11+")]))
 t.start()
 for _ in range(500):
     if order:
         break
     time.sleep(0.01)
 time.sleep(0.01)
-fast = app_versions.get_policy("macos", "11+")
+fast = app_versions.get_policies()[("macos", "11+")]
 first_may_finish.set()
 t.join(5)
 check("overlapping reloads: the later-started load wins", app_versions._cached_policies[("macos", "11+")]["min_minor"] == 3
       and fast["min_minor"] == 3, app_versions._cached_policies)
 check("the slow, older load returns the newer cached answer instead of its own", slow_result and slow_result[0]["min_minor"] == 3,
       slow_result)
+app_versions._cached_at = None
+app_versions._load_all = lambda: (_ for _ in ()).throw(RuntimeError("db down"))
+r = client.get("/api/version_check?os=macos&os_version=windows&major=1&minor=0", headers=ip)
+check("thresholds never loaded: not blocked", r.status_code == 200 and r.get_json().get("force_update") is False,
+      (r.status_code, r.data))
 app_versions._load_all = real_load
 db_connection.psycopg2.connect = real_connect
 

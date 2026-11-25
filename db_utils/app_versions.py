@@ -53,16 +53,15 @@ def _load_all() -> dict[tuple[str, str], dict]:
     }
 
 
-def get_policy(os_name: str, os_version: str) -> dict | None:
-    """回傳指定作業系統/分流（os_version，例如 '11+'、'10.15'——同一個 os
-    可能有好幾包各自獨立發版的 build）的版本門檻，查無資料回傳 None
-    （呼叫端應該視為「沒有門檻資訊，不擋」，不要讓查詢失敗變成使用者
-    連工作都開始不了）。"""
+def get_policies() -> dict[tuple[str, str], dict]:
+    """回傳整張門檻表，key 是 (os, os_version)（os_version 是同一個 os 底下
+    各自獨立發版的分流，例如 '11+'、'10.15'）。表裡沒有的組合代表不是任何
+    一個正式版會送的值，怎麼處理由呼叫端決定。從來沒讀成功過時往外丟。"""
     global _cached_at, _cached_policies
 
     with _cache_lock:
         if _cached_at is not None and time.monotonic() - _cached_at < config.APP_VERSIONS_CACHE_SECONDS:
-            return _cached_policies.get((os_name, os_version))
+            return _cached_policies
 
     # 快取的時間記「開始讀」的時間，不是讀完的時間：門檻改了之後最晚
     # APP_VERSIONS_CACHE_SECONDS 秒生效這個說法才不會因為連線慢而失準，
@@ -79,10 +78,10 @@ def get_policy(os_name: str, os_version: str) -> dict | None:
             print(f"[app_versions] 讀取門檻失敗，沿用上一份快取：{exc}", flush=True)
             if started > _cached_at:
                 _cached_at = started
-            return _cached_policies.get((os_name, os_version))
+            return _cached_policies
 
     with _cache_lock:
         if _cached_at is None or started >= _cached_at:
             _cached_policies = policies
             _cached_at = started
-        return _cached_policies.get((os_name, os_version))
+        return _cached_policies

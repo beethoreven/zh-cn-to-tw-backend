@@ -421,7 +421,7 @@ curl https://<你的部署網址>/api/jobs/active
 
 ### 版本檢查
 
-- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — 前端在開始每個 Stage 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 11 以上一包、10.15 改用內嵌的 Tesseract 做 OCR 另一包），省略時預設 `11+`
+- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — 前端在開始每個 Stage 前各打一次，回傳是否要強制更新。`os_version` 是分流參數，不是「使用者系統版本」，而是「這包桌面殼本身屬於哪一個 build」——同一個 `os` 之後可能同時發好幾包各自獨立版控的桌面 App（例如 macOS 11 以上一包、10.15 改用內嵌的 Tesseract 做 OCR 另一包），只認 `app_versions` 裡有的 `(os, os_version)` 組合：參數缺漏、格式不對、或組合不在表裡，一律回 `force_update: true`（狀態碼仍是 200，前端只看這個欄位），正式版送的值都在表裡，送錯的不是有 bug 的舊版就是被改過的 client。只有讀不到門檻（資料庫有問題、從沒讀成功過）或整張表是空的時候不擋。所以新增分流要先在表裡加一列再發版。
 
 ### 桌面版強制更新門檻
 
@@ -883,7 +883,7 @@ too frequent returns 429 with `Retry-After`; both bodies are
 
 ### Version Check
 
-- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — the frontend calls this once before starting each Stage, to find out whether it must force an update. `os_version` isn't "the user's OS version" — it's a build-tier selector: which desktop build this shell actually is, since the same `os` may end up with several independently-versioned desktop builds shipping side by side (e.g. one for macOS 11+, one for 10.15 that does Stage 1 OCR with a bundled Tesseract). Omitting it defaults to `11+`
+- `GET /api/version_check?os=macos&os_version=11%2B&major=1&minor=3` — the frontend calls this once before starting each Stage, to find out whether it must force an update. `os_version` isn't "the user's OS version" — it's a build-tier selector: which desktop build this shell actually is, since the same `os` may end up with several independently-versioned desktop builds shipping side by side (e.g. one for macOS 11+, one for 10.15 that does Stage 1 OCR with a bundled Tesseract). Only `(os, os_version)` combinations present in `app_versions` are accepted: missing or malformed parameters, or a combination not in the table, always get `force_update: true` (still with status 200, since the frontend only looks at that field). Every release build sends a combination that is in the table, so anything else is either an old build with a bug or a modified client. It only lets a request through when the thresholds can't be read (a database problem, never loaded successfully) or the table is empty. So a new tier needs its row in the table before the build ships.
 
 ### Desktop Forced-Update Thresholds
 
