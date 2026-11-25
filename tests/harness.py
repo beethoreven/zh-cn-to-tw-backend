@@ -47,6 +47,7 @@ os.environ.update(
         "GEMINI_API_KEY": "dummy-not-a-key",
         "ANTHROPIC_API_KEY": "dummy-not-a-key",
         "GOOGLE_CLIENT_ID": "test-client.apps.googleusercontent.com",
+        "SESSION_SIGNING_KEY": "test-signing-key-not-a-real-secret-0123456789",
     }
 )
 sys.path.insert(0, BACKEND)

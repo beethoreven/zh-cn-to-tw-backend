@@ -251,35 +251,6 @@ def _ensure_sessions(cur) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_login_sessions_last_seen ON login_sessions(last_seen_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_login_sessions_created ON login_sessions(created_at)")
-    _migrate_plaintext_sessions(cur)
-
-
-def _migrate_plaintext_sessions(cur) -> None:
-    """舊的 sessions 表存的是 token 原文。把每一筆換成雜湊搬進
-    login_sessions，再把舊表整張刪掉：已經登入的人不用重新登入，資料庫裡
-    也不再留著能直接拿來登入的值。
-
-    每次啟動都會檢查，舊表不在就什麼都不做。部署切換的那幾秒，還沒停的
-    舊行程仍然查、寫舊表：新行程第一次碰資料庫時就把舊表刪了，之後舊行程
-    的登入檢查與登入都會失敗（500），直到它被停掉；那段期間的新登入不會
-    留下來，要重新登入一次。"""
-    cur.execute("SELECT to_regclass('public.sessions')")
-    if cur.fetchone()[0] is None:
-        return
-    # 放在函式裡 import：auth_utils.sessions 會 import db_utils.connection，
-    # 放在檔案開頭會跟 schema 的載入順序繞成循環。
-    from auth_utils.sessions import hash_token
-
-    cur.execute("SELECT token, email, created_at, last_seen_at FROM sessions")
-    rows = cur.fetchall()
-    for token, email, created_at, last_seen_at in rows:
-        cur.execute(
-            "INSERT INTO login_sessions (token_hash, email, created_at, last_seen_at) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (token_hash) DO NOTHING",
-            (hash_token(token), email, created_at, last_seen_at),
-        )
-    cur.execute("DROP TABLE sessions")
-    print(f"[schema] 已把 {len(rows)} 筆 session 換成雜湊存放，舊的 sessions 表已刪除", flush=True)
 
 
 def _ensure_jobs(cur) -> None:

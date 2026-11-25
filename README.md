@@ -135,7 +135,7 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 
 不需要登入就能呼叫的端點，盡量不開資料庫連線，不然任何人隨便打都能佔掉那 5 個連線名額：
 
-- `/auth/status`、`/auth/logout`：token 不是我們發的格式（64 個小寫十六進位字元）就直接當成無效，不去查資料庫。
+- `/auth/status`、`/auth/logout`：session token 是 64 個十六進位字元的亂數加上用 `SESSION_SIGNING_KEY` 算的 HMAC-SHA256 簽章（共 128 個小寫十六進位字元）。格式不對或簽章對不上就直接當成無效，不去查資料庫：沒有金鑰的人湊不出會被拿去查的 token。換掉 `SESSION_SIGNING_KEY` 等於讓所有人登出，金鑰外流時就這樣處理。
 - `/api/version_check`：整張強制更新門檻表快取在記憶體 60 秒（`APP_VERSIONS_CACHE_SECONDS`）。只快取查過的組合不夠，對方換一組參數就又會去開連線。代價是改了門檻最晚 60 秒後才生效。讀不到資料庫時沿用上一份，而且當成剛讀過：資料庫出問題的期間每 60 秒只重試一次，不會每個請求都去試連線。快取剛過期時幾個請求可能同時重讀，只有比目前快取更晚開始讀的那份會寫進去：先開始、卻因為連線慢而晚讀完的那份是比較舊的資料，不能蓋掉新的（用測試重現過）。
 - `/api/jobs/active`：數這個行程記憶體裡還在跑的工作，不查資料庫。
 - `/auth/login`：Google 憑證驗證通過之後才查資料庫。
@@ -246,7 +246,7 @@ cp .env.example .env
 打開 `.env`，把 `DATABASE_URL`（Neon Postgres 連線字串）跟
 `GEMINI_API_KEY` 填成 Render 的 Environment 分頁裡設定的同一組值——
 本機開發、桌面版 App、Render 一律連同一個 Neon 資料庫，不是本機另外
-申請一組測試用的。要測登入功能需要另外填 `GOOGLE_CLIENT_ID`。
+申請一組測試用的。要測登入功能需要另外填 `GOOGLE_CLIENT_ID`。`SESSION_SIGNING_KEY` 填一組自己產生的隨機字串（見 Part C），沒填後端不會啟動。
 
 ### 4. 準備至少一個管理員帳號
 
@@ -320,7 +320,7 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres python 
 2. 到 [render.com](https://render.com) 建立 Web Service，連接這個 repo。
 3. **Build Command**: `pip install -r requirements.txt`
 4. **Start Command**: `python3 app.py`（`app.py` 本身就是啟動入口，裡面用 waitress 提供服務；Flask 附的 Werkzeug 伺服器只在設了 `FLASK_DEBUG=true` 的本機開發時使用。刻意維持單一行程、多執行緒，因為授權快取、工作狀態、限流計數都放在行程記憶體裡，開多個行程會各算各的，所以不用 gunicorn 的多 worker）
-5. 到 Environment 分頁，只設定沒有預設值的那四個:`DATABASE_URL`、`GEMINI_API_KEY`、`GOOGLE_CLIENT_ID`、`ANTHROPIC_API_KEY`（最後一個選填）。`.env.example` 列出的其他變數在程式裡都有預設值，**不要**照著全部設上去——設了就會蓋過程式裡的預設值，之後改程式的預設會沒有效果（見 Part C）。Python 版本由 repo 裡的 `.python-version` 決定（目前 3.12）;如果 Environment 分頁設了 `PYTHON_VERSION`，它會蓋過 `.python-version`，不要另外設。
+5. 到 Environment 分頁，只設定沒有預設值的那五個:`DATABASE_URL`、`GEMINI_API_KEY`、`GOOGLE_CLIENT_ID`、`SESSION_SIGNING_KEY`（按 Add Environment Variable 後用 Generate 產生一組隨機值即可）、`ANTHROPIC_API_KEY`（最後一個選填）。沒設 `SESSION_SIGNING_KEY` 或少於 32 個字元，後端會拒絕啟動。`.env.example` 列出的其他變數在程式裡都有預設值，**不要**照著全部設上去——設了就會蓋過程式裡的預設值，之後改程式的預設會沒有效果（見 Part C）。Python 版本由 repo 裡的 `.python-version` 決定（目前 3.12）;如果 Environment 分頁設了 `PYTHON_VERSION`，它會蓋過 `.python-version`，不要另外設。
 6. 部署完成後測試 `/api/health`。
 
 > Render 免費方案閒置約 15 分鐘會休眠，喚醒可能要數十秒。`zh-cn-to-tw-web` 的前端會自己做 keep-alive（每 5 分鐘打一次 `/api/health`），不依賴外部排程器。
@@ -355,6 +355,7 @@ curl https://<你的部署網址>/api/jobs/active
 | `DATABASE_URL` | **必填** | Neon Postgres 連線字串。**Neon project 的區域必須跟 Render service 同區**（目前兩邊都是 `ap-southeast-1` 新加坡），見下面「資料庫與 Render 必須同區」 |
 | `GEMINI_API_KEY` | Stage 1 必填 | Google AI Studio 申請 |
 | `GOOGLE_CLIENT_ID` | 登入功能必填 | Google Cloud Console 的 OAuth Client ID |
+| `SESSION_SIGNING_KEY` | 必填 | 簽 session token 用的金鑰，至少 32 個字元的隨機字串（例如 `python3 -c "import secrets; print(secrets.token_hex(32))"`）。本機與 Render 各用各的；換掉會讓所有人登出 |
 | `ANTHROPIC_API_KEY` | 選填 | 不填就無法選 Claude Haiku 校對 |
 
 其餘變數都有預設值（寫在 `configs/config.py`，少數幾個在各自的模組裡），不設就走預設;在環境變數裡設了同名的值就會蓋過預設。要改線上行為有兩條路:改程式裡的預設值再部署，或在 Render 設環境變數。**兩者擇一就好**——同一個設定兩邊都有值的時候以環境變數為準，程式裡的預設值等於沒作用。
@@ -582,7 +583,7 @@ This backend runs on Render's free tier (0.1 CPU, 512 MB) as a single process, w
 
 Endpoints callable without signing in avoid opening database connections, since otherwise anyone could tie up those 5 connection slots:
 
-- `/auth/status`, `/auth/logout`: a token not in the format we issue (64 lowercase hex characters) is treated as invalid without querying the database.
+- `/auth/status`, `/auth/logout`: a session token is 64 hex characters of randomness followed by an HMAC-SHA256 signature computed with `SESSION_SIGNING_KEY` (128 lowercase hex characters in all). A token with the wrong format or a signature that doesn't match is treated as invalid without querying the database: without the key nobody can produce a token that gets looked up. Changing `SESSION_SIGNING_KEY` signs everyone out, which is what to do if the key leaks.
 - `/api/version_check`: the whole forced-update threshold table is cached in memory for 60 seconds (`APP_VERSIONS_CACHE_SECONDS`). Caching only the combinations already asked about isn't enough — a caller could change the parameters to force a new connection each time. The cost is that a threshold change can take up to 60 seconds to apply. If the database can't be read, the previous copy is used and treated as freshly read: while the database has trouble, it is retried only once every 60 seconds rather than on every request. When the cache has just expired, several requests may reload at once, and only a copy that started loading later than the current cache gets written: one that started first but finished last because of a slow connection holds older data and must not overwrite newer data (reproduced in a test).
 - `/api/jobs/active`: counts the jobs still running in this process's memory, without querying the database.
 - `/auth/login`: the database is queried only after the Google credential has been verified.
@@ -694,7 +695,7 @@ Open `.env` and set `DATABASE_URL` (a Neon Postgres connection string)
 and `GEMINI_API_KEY` to the same values already configured on Render's
 Environment tab — local dev, the desktop app, and Render all connect
 to the same Neon database, not a separate one set up just for local
-testing. Testing login also requires `GOOGLE_CLIENT_ID`.
+testing. Testing login also requires `GOOGLE_CLIENT_ID`. Set `SESSION_SIGNING_KEY` to a random string you generate yourself (see Part C); the backend won't start without it.
 
 ### 4. Seed at Least One Admin Account
 
@@ -769,7 +770,7 @@ On every push to GitHub, `.github/workflows/tests.yml` runs the same tests again
 2. Create a Web Service on [render.com](https://render.com), connect this repo.
 3. **Build Command**: `pip install -r requirements.txt`
 4. **Start Command**: `python3 app.py` (`app.py` is the entry point itself and serves with waitress; Flask's bundled Werkzeug server is only used for local development with `FLASK_DEBUG=true`. It deliberately stays one multi-threaded process, because the authorization cache, job state and rate-limit counters live in process memory and several processes would each keep their own; that's why gunicorn's multiple workers aren't used)
-5. On the Environment tab, set only the four variables that have no default: `DATABASE_URL`, `GEMINI_API_KEY`, `GOOGLE_CLIENT_ID`, `ANTHROPIC_API_KEY` (the last one is optional). Every other variable listed in `.env.example` has a default in code — do **not** set them all, because a set variable overrides the code default and later changes to that default would silently have no effect (see Part C). The Python version comes from the repo's `.python-version` (currently 3.12); a `PYTHON_VERSION` variable on the Environment tab would override it, so don't set one.
+5. On the Environment tab, set only the five variables that have no default: `DATABASE_URL`, `GEMINI_API_KEY`, `GOOGLE_CLIENT_ID`, `SESSION_SIGNING_KEY` (click Add Environment Variable and use Generate for a random value), `ANTHROPIC_API_KEY` (the last one is optional). Without `SESSION_SIGNING_KEY`, or with one shorter than 32 characters, the backend refuses to start. Every other variable listed in `.env.example` has a default in code — do **not** set them all, because a set variable overrides the code default and later changes to that default would silently have no effect (see Part C). The Python version comes from the repo's `.python-version` (currently 3.12); a `PYTHON_VERSION` variable on the Environment tab would override it, so don't set one.
 6. After deploy, test `/api/health`.
 
 > Render's free tier sleeps after ~15 minutes idle; waking up can take tens of seconds. `zh-cn-to-tw-web`'s frontend self-heartbeats (pinging `/api/health` every 5 minutes) instead of relying on any external scheduler.
@@ -805,6 +806,7 @@ Only the four below have no default and must be set by hand. These four are also
 | `DATABASE_URL` | **Required** | Neon Postgres connection string. **The Neon project's region must match the Render service's region** (both are currently `ap-southeast-1`, Singapore) — see "The Database Must Sit in the Same Region as Render" above |
 | `GEMINI_API_KEY` | Required for Stage 1 | From Google AI Studio |
 | `GOOGLE_CLIENT_ID` | Required for login | OAuth Client ID from Google Cloud Console |
+| `SESSION_SIGNING_KEY` | Required | Key for signing session tokens: a random string of at least 32 characters (e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`). Local and Render each use their own; changing it signs everyone out |
 | `ANTHROPIC_API_KEY` | Optional | Without it, Claude Haiku proofreading is unavailable |
 
 Every other variable has a default (in `configs/config.py`, a few in their own modules) and falls back to it when unset; setting an environment variable of the same name overrides the default. There are two ways to change production behaviour: change the default in code and deploy, or set an environment variable on Render. **Pick one** — when both have a value the environment variable wins and the code default is effectively dead.

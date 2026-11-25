@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -55,15 +56,34 @@ SESSION_MAX_DAYS = int(os.environ.get("SESSION_MAX_DAYS", "180"))
 # 方案的寫入量——但不要再拿那個過期數字當理由，要調之前先量現況。
 _TOUCH_MIN_INTERVAL_SECONDS = 60
 
-# token 的格式（secrets.token_hex(32)：64 個小寫十六進位字元，這一層從一開始
-# 就是這個格式）。不是這個格式的一定不是我們發的，直接當成無效，不必開資料庫
-# 連線去查——/auth/status、/auth/logout 不需要登入就能呼叫，隨便帶一串字就
-# 能讓後端開一條連線，而同時連線上限只有 5（見 db_utils/connection.py）。
-_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
+# token = 64 個十六進位字元的亂數 + 64 個十六進位字元的簽章（用 SESSION_SIGNING_KEY
+# 對亂數算 HMAC-SHA256），共 128 個小寫十六進位字元。
+#
+# 簽章不對的一定不是我們發的，直接當成無效，不必開資料庫連線去查：
+# /auth/status、/auth/logout 不需要登入就能呼叫，以前只檢查格式時，任何人
+# 照格式隨便湊一串就能讓後端開一條連線查一次，而同時連線上限只有 5（見
+# db_utils/connection.py）。有了簽章，沒有金鑰就湊不出會被拿去查的 token。
+#
+# 換掉 SESSION_SIGNING_KEY 等於讓所有人登出（舊 token 的簽章全部對不上）；
+# 金鑰外流時這正是要的效果。早期只有亂數、沒有簽章的 64 字元 token 也因此
+# 一律無效，用戶端收到 401 會自己重新登入一次。
+_SIGNING_KEY = os.environ.get("SESSION_SIGNING_KEY", "")
+if len(_SIGNING_KEY) < 32:
+    # 沒設金鑰就不啟動：寧可部署失敗（Render 會繼續用舊版服務），也不要用
+    # 空金鑰或很短的金鑰簽出任何人都能偽造的 token
+    raise RuntimeError("SESSION_SIGNING_KEY 沒有設定或少於 32 個字元，請在環境變數設定一組隨機字串")
+_TOKEN_PATTERN = re.compile(r"[0-9a-f]{128}")
+
+
+def _sign(nonce_hex: str) -> str:
+    return hmac.new(_SIGNING_KEY.encode("utf-8"), nonce_hex.encode("ascii"), hashlib.sha256).hexdigest()
 
 
 def _is_well_formed(token: str | None) -> bool:
-    return bool(token) and _TOKEN_PATTERN.fullmatch(token) is not None
+    """格式對、而且簽章是用我們的金鑰簽的。"""
+    if not token or _TOKEN_PATTERN.fullmatch(token) is None:
+        return False
+    return hmac.compare_digest(token[64:], _sign(token[:64]))
 
 
 def hash_token(token: str) -> str:
@@ -82,7 +102,8 @@ def _now_iso() -> str:
 def create_session(email: str) -> str:
     """驗證過 Google ID Token、確認過白名單之後才呼叫——這裡不重複做
     這兩件事，呼叫端（/auth/login）負責。"""
-    token = secrets.token_hex(32)
+    nonce_hex = secrets.token_hex(32)
+    token = nonce_hex + _sign(nonce_hex)
     now = _now_iso()
     conn, cur = get_ready_conn()
     try:
