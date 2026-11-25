@@ -7,6 +7,7 @@
 # 版本一律用最新的正式版（2026-11-25 查 PyPI），例外如下：
 Flask==3.1.3
 Flask-Cors==6.0.5
+waitress==3.0.2
 python-dotenv==1.2.4
 opencc-python-reimplemented==0.1.7
 python-docx==1.2.0

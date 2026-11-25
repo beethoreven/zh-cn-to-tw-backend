@@ -1574,19 +1574,26 @@ def admin_list_audit_log():
 
 
 if __name__ == "__main__":
-    # 預設關閉 debug 模式——Werkzeug 的互動除錯器一旦在正式環境被觸發，
-    # 會把完整 stack trace、原始碼路徑暴露給任何看得到錯誤頁面的人，
-    # 嚴重一點甚至是可利用的 RCE 介面。本機開發需要的話可以另外設
-    # FLASK_DEBUG=true，不需要動程式碼。
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    # threaded=True 是關鍵：Werkzeug 預設單執行緒，一次只能處理一個
-    # HTTP 連線。Stage 1/2 送出後會在背景執行緒跑 OCR/PDF/LLM 呼叫，
-    # 這段期間如果 Werkzeug 不能同時接其他連線，前端輪詢進度就會在處理中
-    # 被卡住、逾時，瀏覽器端看到的就是 net::ERR_FAILED（連 CORS header
-    # 都沒有，因為連線根本沒被處理完）。程式碼裡本來就已經對所有共用
-    # 可變狀態加了鎖（job_manager/review_manager 各自的 _lock、
-    # ocr_engine 的 _ocr_lock；資料庫連線改成每次獨立連線 + 號誌限流，
-    # 見 db_utils/connection.py 開頭的說明，不共用連線也就不需要額外的
-    # 鎖），本來就是為了支援並行存取設計的，只是少了這個 threaded=True
-    # 讓 Werkzeug 真的並行處理請求，之前一直沒發現。
-    app.run(host="0.0.0.0", port=5001, debug=debug_mode, use_reloader=False, threaded=True)
+    port = 5001
+    # 本機開發要 Werkzeug 的除錯器時才設 FLASK_DEBUG=true。正式環境一定不能
+    # 開：互動除錯器被觸發時會把完整 stack trace、原始碼路徑暴露給任何看得到
+    # 錯誤頁面的人，嚴重一點甚至是可利用的 RCE 介面。
+    if os.environ.get("FLASK_DEBUG", "false").lower() == "true":
+        # threaded=True：Werkzeug 預設一次只處理一個連線，前端輪詢進度會在
+        # 別的請求處理中被卡住、逾時（瀏覽器端看到 net::ERR_FAILED）。
+        app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False, threaded=True)
+    else:
+        # 正式環境用 waitress，不用 Werkzeug：Werkzeug 是 Flask 附的開發用伺服器，
+        # 官方明講不要拿來對外服務，慢速或大量的連線比較容易把它卡住。
+        #
+        # 刻意維持單一行程（多執行緒）：授權快取、工作狀態、限流計數都放在
+        # 行程記憶體裡（見 auth_utils/whitelist.py、request_limits/limits.py），
+        # 開多個行程會讓它們各算各的。所以不用 gunicorn 的多 worker。也因為
+        # 啟動方式還是 python3 app.py，Render 的啟動指令不用改。
+        #
+        # threads：同時處理的請求數。Stage 1/3 的 LLM 呼叫在背景執行緒跑，
+        # 請求本身都很短，16 個綽綽有餘；資料庫連線另外有號誌限流（見
+        # db_utils/connection.py），這裡開多也不會壓垮資料庫。
+        from waitress import serve
+
+        serve(app, host="0.0.0.0", port=port, threads=16)

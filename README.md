@@ -319,7 +319,7 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres python 
 1. 把這個 repo push 到 GitHub。
 2. 到 [render.com](https://render.com) 建立 Web Service，連接這個 repo。
 3. **Build Command**: `pip install -r requirements.txt`
-4. **Start Command**: `python3 app.py`（這支不是用 gunicorn，`app.py` 本身就是啟動入口）
+4. **Start Command**: `python3 app.py`（`app.py` 本身就是啟動入口，裡面用 waitress 提供服務；Flask 附的 Werkzeug 伺服器只在設了 `FLASK_DEBUG=true` 的本機開發時使用。刻意維持單一行程、多執行緒，因為授權快取、工作狀態、限流計數都放在行程記憶體裡，開多個行程會各算各的，所以不用 gunicorn 的多 worker）
 5. 到 Environment 分頁，只設定沒有預設值的那四個:`DATABASE_URL`、`GEMINI_API_KEY`、`GOOGLE_CLIENT_ID`、`ANTHROPIC_API_KEY`（最後一個選填）。`.env.example` 列出的其他變數在程式裡都有預設值，**不要**照著全部設上去——設了就會蓋過程式裡的預設值，之後改程式的預設會沒有效果（見 Part C）。Python 版本由 repo 裡的 `.python-version` 決定（目前 3.12）;如果 Environment 分頁設了 `PYTHON_VERSION`，它會蓋過 `.python-version`，不要另外設。
 6. 部署完成後測試 `/api/health`。
 
@@ -768,7 +768,7 @@ On every push to GitHub, `.github/workflows/tests.yml` runs the same tests again
 1. Push this repo to GitHub.
 2. Create a Web Service on [render.com](https://render.com), connect this repo.
 3. **Build Command**: `pip install -r requirements.txt`
-4. **Start Command**: `python3 app.py` (not gunicorn — `app.py` is the entry point itself)
+4. **Start Command**: `python3 app.py` (`app.py` is the entry point itself and serves with waitress; Flask's bundled Werkzeug server is only used for local development with `FLASK_DEBUG=true`. It deliberately stays one multi-threaded process, because the authorization cache, job state and rate-limit counters live in process memory and several processes would each keep their own; that's why gunicorn's multiple workers aren't used)
 5. On the Environment tab, set only the four variables that have no default: `DATABASE_URL`, `GEMINI_API_KEY`, `GOOGLE_CLIENT_ID`, `ANTHROPIC_API_KEY` (the last one is optional). Every other variable listed in `.env.example` has a default in code — do **not** set them all, because a set variable overrides the code default and later changes to that default would silently have no effect (see Part C). The Python version comes from the repo's `.python-version` (currently 3.12); a `PYTHON_VERSION` variable on the Environment tab would override it, so don't set one.
 6. After deploy, test `/api/health`.
 
