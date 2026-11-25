@@ -169,6 +169,14 @@ OCR 搬到桌面版之後，伺服器端那條路徑（`POST /api/jobs` → `run
 - 查詢：`GET /admin/audit-log`，只有管理員能叫，新的在前，`limit` 預設 100、最多 500，往前翻頁帶上一頁最後一筆的 `id` 當 `before_id`。
 - 強制更新門檻（`app_versions`）與桌面版公告（`ta-notice.txt`）沒有 API，是直接改資料庫或檔案，不經過這裡；後端也沒有刪除別人資料或匯出資料的 API。之後加這類 API，記得一起記進這張表。
 
+### Claude 使用次數上限：每人每月，開始工作前先扣
+
+管理員介面「權限管理」的「Haiku 使用上限」（`permissions.allowed_haiku`）是每個角色的上限，每個人各自計算，以台灣時間的月份為一期（`usage/claude_quota.py`，計數存在 `claude_quota_usage` 表）。用 Claude 開始一份工作算一次：Stage 1 的前置處理、Stage 2 的分析報告、Stage 3 的校對與重新校對；不管那份工作之後分幾批呼叫 API 都只算一次。用 Gemini 不算，不會呼叫 LLM 的請求（前置處理關掉、沒有字詞修改的分析）也不算。
+
+- 在所有欄位檢查都通過、真的要開始之前扣，扣不到回 429 並請使用者改用 Gemini，整份工作不開始：不會做到一半才被擋，也不會先花了錢才拒絕。扣了之後工作中途失敗不退回。
+- 扣次數是一句 `INSERT ... ON CONFLICT DO UPDATE ... WHERE used < 上限`，資料庫在同一列上排隊：同時送出 12 份、只剩 4 次時剛好 4 份通過（有測試）。先查再寫的話，好幾份會同時看到「還剩一次」一起通過。
+- 這個欄位從管理員介面一開始就有，但 2026-11 之前後端從沒讀過它，設多少都不會擋。上限設 0 等於不能用 Claude。
+
 ### 建表與遷移：commit 之後才算完成
 
 `ensure_schema`（`db_utils/schema.py`）在每個行程第一次用到資料庫時建表、補欄位、跑遷移，跑完打開一個旗標，之後的請求直接跳過。原本旗標在 commit 之前就打開：第一個請求還在 commit 的時候進來的請求會跳過這段、去查別的連線還看不到的表而失敗；commit 要是失敗，旗標也已經打開，到行程重啟之前都不會再建一次，每個請求都會出錯。現在 commit 之後才打開旗標；失敗的那次也會關掉連線，把連線名額還回去（原本會少一個名額）。三種情況都用真的 Postgres 重現過，改之前會失敗、改之後通過。
@@ -190,7 +198,7 @@ pattern/                  Stage 2 套用範本修改：範本解析、套用引�
 pattern.txt               Stage 2 的預設範本（每次請求重讀）
 pipeline/orchestrator.py  Stage 1 的簡轉繁→前置處理 流程編排（不含 OCR，OCR 一律在使用者本機做）
 llm_utils/                Gemini/Claude 呼叫封裝
-usage/                    用量統計（Gemini 次數、Claude token/費用）
+usage/                    用量統計（Gemini 次數、Claude token/費用）、每人每月 Claude 次數上限
 admin_utils/              管理員介面（使用者/權限/專案管理）與管理操作紀錄
 output_utils/             輸出成 .txt/.docx
 convert_utils/            OpenCC 簡轉繁
@@ -617,6 +625,14 @@ Every admin write is recorded in the `admin_audit_log` table (`admin_utils/audit
 - Reading: `GET /admin/audit-log`, admins only, newest first; `limit` defaults to 100 with a maximum of 500, and to page back, pass the last row's `id` from the previous page as `before_id`.
 - The forced-update thresholds (`app_versions`) and the desktop notice (`ta-notice.txt`) have no API: they are changed directly in the database or the file and don't pass through here. The backend also has no API that deletes other people's data or exports data. Any such API added later should record into this table too.
 
+### Claude Usage Limit: Per Person per Month, Taken Before the Work Starts
+
+"Haiku 使用上限" (Haiku usage limit) under the admin interface's permissions tab (`permissions.allowed_haiku`) is a per-role limit, counted separately for each person, per calendar month in Taiwan time (`usage/claude_quota.py`; counts live in the `claude_quota_usage` table). Starting one piece of work on Claude counts once: Stage 1 preprocessing, the Stage 2 analysis report, Stage 3 proofreading and reruns — however many API batches that work later makes. Gemini doesn't count, and neither do requests that won't call an LLM (preprocessing off, an analysis with no word changes).
+
+- The count is taken after every field check passes and right before the work starts; if none is left the response is a 429 asking the user to switch to Gemini, and the work doesn't start at all: nothing is stopped halfway, and nothing is charged before being refused. A count taken is not refunded if the work later fails.
+- Taking a count is a single `INSERT ... ON CONFLICT DO UPDATE ... WHERE used < limit`, so the database queues requests on the same row: 12 sent at once with 4 left lets exactly 4 through (tested). Checking first and writing afterwards would let several see "one left" and all pass.
+- The field has existed in the admin interface from the start, but until 2026-11 the backend never read it, so no value ever blocked anything. A limit of 0 means no Claude at all.
+
 ### Schema Setup Counts as Done Only After It Commits
 
 `ensure_schema` (`db_utils/schema.py`) creates tables, adds columns, and runs migrations the first time each process touches the database, then sets a flag so later requests skip it. The flag used to be set before the commit: a request arriving while the first one was still committing skipped the setup and queried tables that other connections couldn't see yet, and failed; and if the commit failed, the flag was already set, so the setup never ran again until the process restarted and every request errored. Now the flag is set only after the commit, and the failed attempt also closes its connection so the connection slot is returned (it used to be lost). All three cases were reproduced against a real Postgres; they fail before the change and pass after it.
@@ -638,7 +654,7 @@ pattern/                  Stage 2 Apply Template: template parsing, the apply en
 pattern.txt               Stage 2's default template (re-read on every request)
 pipeline/orchestrator.py  Stage 1's conversion→preprocessing orchestration (no OCR; OCR always runs on the user's machine)
 llm_utils/                Gemini/Claude call wrappers
-usage/                    usage tracking (Gemini call counts, Claude tokens/cost)
+usage/                    usage tracking (Gemini call counts, Claude tokens/cost), per-person monthly Claude limit
 admin_utils/              admin interface (users/permissions/projects) and the admin audit log
 output_utils/             .txt/.docx export
 convert_utils/            OpenCC Simplified→Traditional conversion

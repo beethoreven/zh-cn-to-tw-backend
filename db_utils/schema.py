@@ -12,6 +12,7 @@
    不重要，放最後只是照加入的時間排
 8. admin_audit_log（管理操作紀錄）——同樣沒有 FK 依賴：對象被刪掉之後
    紀錄還是要留著，所以 actor 存 email、對象只存 id，不設外鍵
+9. claude_quota_usage（每人每月 Claude 使用次數）——也不設外鍵，email 存小寫
 
 只支援 Postgres（Neon），不再有 SQLite 模式——見 db_utils/connection.py。
 
@@ -83,6 +84,7 @@ def ensure_schema(cur) -> None:
         _ensure_jobs(cur)
         _ensure_app_versions(cur)
         _ensure_admin_audit_log(cur)
+        _ensure_claude_quota_usage(cur)
 
         # 先 commit 再打開旗標。反過來的話，從旗標打開到 commit 之間，其他
         # 執行緒會跳過這段、直接去查還沒 commit 的表（別的連線看不到，查詢
@@ -343,6 +345,21 @@ def _ensure_app_versions(cur) -> None:
     # 資料，這段「查無就補」的判斷條件從此永遠成立，變成每次 backend
     # 啟動都會憑空重新種出一筆過期、沒有任何 client 會查到的
     # (macos, '13+', ...) 死資料（2026-08-21 發現、移除）。
+
+
+def _ensure_claude_quota_usage(cur) -> None:
+    # 每人每月用 Claude 開始了幾份工作，跟 permissions.allowed_haiku 比，見
+    # usage/claude_quota.py。month 是台灣時間的 YYYY-MM。
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS claude_quota_usage (
+            user_email TEXT NOT NULL,
+            month TEXT NOT NULL,
+            used INTEGER NOT NULL,
+            PRIMARY KEY (user_email, month)
+        )
+        """
+    )
 
 
 def _ensure_admin_audit_log(cur) -> None:

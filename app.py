@@ -29,6 +29,7 @@ from pipeline.orchestrator import run_refine_only_pipeline
 from request_limits import limits as request_limits
 from review import review_manager
 from review.reviewer import run_review
+from usage import claude_quota
 from usage.fx_rate import get_usd_twd_rate
 from usage.usage_log import (
     get_project_token_usage,
@@ -627,6 +628,17 @@ def _require_project_id(raw_value) -> int:
         raise ValueError("缺少或無效的 project（劇本案）ID")
 
 
+def _consume_claude_quota(model: str):
+    """用 Claude 開始一份工作前扣一次每月次數（見 usage/claude_quota.py）。
+    放在所有檢查都通過、真的要開始之前：欄位不合法而沒開始的請求不扣。
+    扣不到回傳錯誤回應，呼叫端直接回傳、不要開始工作；扣到了回傳 None。"""
+    try:
+        claude_quota.consume(request.user_email, model)
+    except claude_quota.ClaudeQuotaExceeded as exc:
+        return jsonify({"error": str(exc)}), 429
+    return None
+
+
 def _validate_project_and_model(project_id: int, model: str) -> None:
     """檢查這次呼叫的 project/model 組合合不合規則，不合規就拋
     ValueError（呼叫端都已經在 try/except ValueError 裡，會被接住轉成
@@ -679,6 +691,12 @@ def create_job_from_ocr_text():
             _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    # 前置處理關掉就不會呼叫 LLM，不算次數
+    if settings["enable_preprocess"]:
+        quota_error = _consume_claude_quota(settings["model"])
+        if quota_error:
+            return quota_error
 
     job_id = job_manager.create_job(original_filename=settings["file_name"], user_email=request.user_email)
 
@@ -1013,6 +1031,11 @@ def start_pattern_analysis(job_id):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    if word_hits:
+        quota_error = _consume_claude_quota(model)
+        if quota_error:
+            return quota_error
+
     analysis_id = pattern_analysis_manager.create_analysis(job_id, request.user_email, model)
     settings = {
         "model": model,
@@ -1164,6 +1187,10 @@ def start_review(job_id):
     # （_basename_from_original 剛好只會去掉 .pdf，符合這個規則）
     file_name = _basename_from_original(job.get("original_filename"), job_id)
 
+    quota_error = _consume_claude_quota(settings["model"])
+    if quota_error:
+        return quota_error
+
     review_id = _launch_review(job_id, job["result_text"], settings, file_name=file_name)
     return jsonify({"review_id": review_id}), 202
 
@@ -1195,6 +1222,10 @@ def rerun_review(review_id):
     file_name = _basename_from_original(
         source_job.get("original_filename") if source_job else None, review_id
     )
+
+    quota_error = _consume_claude_quota(settings["model"])
+    if quota_error:
+        return quota_error
 
     new_review_id = _launch_review(
         review["source_job_id"],
