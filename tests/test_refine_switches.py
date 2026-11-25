@@ -53,20 +53,25 @@ llm_calls = []
 
 def fake_refine(text, model=None, user_email=None, file_name=None, project=None, items=None):
     llm_calls.append(items)
-    return text
+    # stands in for preprocessing: a visible formatting change that must reach the result
+    return text.replace("內容", "內容。")
 
 
 gemini_client.refine_text = fake_refine
 
 
+def hdr():
+    n = next(_ips)
+    return {"Origin": "zhcntotw://app", "Authorization": f"Bearer {token}", "CF-Connecting-IP": f"203.0.113.{n % 250 + 1}"}
+
+
 def run_job(switches):
     llm_calls.clear()
-    n = next(_ips)
     r = client.post(
         "/api/jobs/from-ocr-text",
         json={"pages": ["第一页内容", "第二页内容"], "model": config.GEMINI_MODEL, "batch_pages": "5",
               "max_retry": "1", "file_name": "t.pdf", "project": project["id"], **switches},
-        headers={"Origin": "zhcntotw://app", "Authorization": f"Bearer {token}", "CF-Connecting-IP": f"203.0.113.{n}"},
+        headers=hdr(),
     )
     if r.status_code != 202:
         return r.status_code, None
@@ -89,9 +94,47 @@ for label, switches, expect_llm in [
     check(f"{label}: accepted (202)", status == 202, status)
     check(f"{label}: job finishes", job is not None and job["status"] == "done", job and job["status"])
     check(f"{label}: result is traditional text", job is not None and "第一頁內容" in (job.get("result_text") or ""), job and job.get("result_text"))
+    result = (job or {}).get("result_text") or ""
     if expect_llm:
         check(f"{label}: LLM gets the preprocessing rules only", llm_calls and all(i == ALL_REFINE_ITEMS for i in llm_calls), llm_calls)
+        check(f"{label}: the preprocessed text is what Stage 1 outputs", "第一頁內容。" in result, result)
     else:
         check(f"{label}: LLM not called", llm_calls == [], llm_calls)
+        check(f"{label}: output is the plain conversion", "內容。" not in result, result)
+    if label.startswith("2.2 default"):
+        default_job = job
+
+# ---------------------------------------------------------------- Stage 1 output -> download -> Stage 2 -> download
+print("== Stage 1 result flows into download and Stage 2")
+import io  # noqa: E402
+import zipfile  # noqa: E402
+
+import docx  # noqa: E402
+
+jid = default_job["id"]
+r = client.get(f"/api/jobs/{jid}", headers=hdr())
+check("job status: done with a result", r.status_code == 200 and r.get_json()["status"] == "done" and r.get_json()["has_result"], r.get_json())
+r = client.get(f"/api/jobs/{jid}/download?format=txt", headers=hdr())
+check("txt download: 200, same text as the job", r.status_code == 200 and r.data.decode("utf-8") == default_job["result_text"], r.status_code)
+check("txt download: file name from the PDF", "t.txt" in r.headers.get("Content-Disposition", ""), r.headers.get("Content-Disposition"))
+r = client.get(f"/api/jobs/{jid}/download?format=docx", headers=hdr())
+ok_zip = r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.data))
+docx_text = "\n".join(p.text for p in docx.Document(io.BytesIO(r.data)).paragraphs) if ok_zip else ""
+check("docx download: a valid Word file with the Stage 1 text", ok_zip and "第一頁內容。" in docx_text and "第二頁內容。" in docx_text, docx_text)
+
+r = client.post(f"/api/jobs/{jid}/pattern", json={"template": "第二頁 → 第貳頁\n"}, headers=hdr())
+data = r.get_json() or {}
+check("Stage 2 on the Stage 1 result: 200", r.status_code == 200 and "job_id" in data, data)
+s2 = data.get("job_id")
+r = client.get(f"/api/jobs/{s2}/download?format=txt", headers=hdr())
+s2_text = r.data.decode("utf-8") if r.status_code == 200 else ""
+check("Stage 2 result: template applied, rest kept", "第貳頁內容。" in s2_text and "第一頁內容。" in s2_text, s2_text)
+from urllib.parse import unquote  # noqa: E402
+
+check("Stage 2 download name marks the template", "t_已套用範本.txt" in unquote(r.headers.get("Content-Disposition", "")), r.headers.get("Content-Disposition"))
+r = client.get(f"/api/jobs/{s2}/pattern-report", headers=hdr())
+check("Stage 2 report download: 200", r.status_code == 200 and len(r.data) > 0, r.status_code)
+r = client.get(f"/api/jobs/{s2}/download?format=docx", headers=hdr())
+check("Stage 2 docx download: valid Word file", r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.data)), r.status_code)
 
 raise SystemExit(0 if harness.summary("refine switches") else 1)
