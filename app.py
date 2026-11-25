@@ -605,19 +605,16 @@ def _parse_bool(raw_value, default: bool) -> bool:
 
 
 def _parse_refine_switches(source) -> dict:
-    """Stage 1 的兩個潤飾開關。`source` 是 request.form 或 JSON dict，兩邊
+    """Stage 1 的前置處理開關。`source` 是 request.form 或 JSON dict，兩邊
     都有 .get，可以共用同一支（一般網頁上傳走表單、桌面殼走 JSON）。
 
-    enable_llm_refine 預設 True 維持舊行為；enable_preprocess 預設「跟
-    enable_llm_refine 一樣」而不是寫死 True——舊版前端/桌面殼不會帶
-    enable_preprocess，寫死 True 會讓那些明確關掉潤飾的舊請求突然開始
-    呼叫 LLM（使用者沒要求、還要付費）。這個預設規則跟
-    pipeline/orchestrator.py 的 run_refine_stage 一致，兩邊要一起改。"""
-    enable_llm_refine = _parse_bool(source.get("enable_llm_refine"), True)
-    return {
-        "enable_llm_refine": enable_llm_refine,
-        "enable_preprocess": _parse_bool(source.get("enable_preprocess"), enable_llm_refine),
-    }
+    「LLM 潤飾」（修正 OCR 錯字）已經拿掉，理由見 llm_utils/prompts.py。
+    舊版用戶端還會送 enable_llm_refine，一律不做；它只在請求沒帶
+    enable_preprocess 時當作前置處理的預設值：更早的用戶端只有這一個開關，
+    關掉它就是「完全不用 LLM」，不能因為潤飾拿掉了就改成會呼叫 LLM（使用者
+    沒要求、還要付費）。兩個都沒帶就照舊預設開啟。"""
+    legacy_refine = _parse_bool(source.get("enable_llm_refine"), True)
+    return {"enable_preprocess": _parse_bool(source.get("enable_preprocess"), legacy_refine)}
 
 
 def _require_project_id(raw_value) -> int:
@@ -654,8 +651,8 @@ def _validate_project_and_model(project_id: int, model: str) -> None:
 @require_auth
 def create_job_from_ocr_text():
     """Stage 1 唯一的入口：PDF 已經在使用者本機做完 OCR（11+ 走
-    zh-cn-to-tw-ocr-service，10.15 走 Apple Vision framework），這裡只接手
-    OpenCC 簡轉繁 + LLM 潤飾。backend 不碰 PDF、不跑 OCR——原本伺服器端
+    zh-cn-to-tw-ocr-service，10.15 走 App 內嵌的 Tesseract），這裡只接手
+    OpenCC 簡轉繁 + LLM 前置處理。backend 不碰 PDF、不跑 OCR——原本伺服器端
     OCR 的 POST /api/jobs 已經拔掉，見 README「為什麼 OCR 搬到使用者本機」。"""
     data = request.get_json(silent=True) or {}
     pages = data.get("pages")
@@ -678,7 +675,7 @@ def create_job_from_ocr_text():
             "project": _require_project_id(data.get("project")),
             **_parse_refine_switches(data),
         }
-        if settings["enable_preprocess"] or settings["enable_llm_refine"]:
+        if settings["enable_preprocess"]:
             _validate_project_and_model(settings["project"], settings["model"])
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

@@ -1,20 +1,25 @@
-"""Stage 1 潤飾用的共用 prompt，Gemini/Claude 都用同一套。
+"""Stage 1 前置處理用的共用 prompt，Gemini/Claude 都用同一套。
 
-六條規則依風險分成三組，前兩組由前端兩個開關各自控制：
+規則分成兩組：
 
 - 「進行前置處理」→ 1/2/3：格式性的機械整理（移除頁碼與標頭、接合斷句、
   全形標點與引號），不涉及語意判斷。
-- 「進行LLM潤飾」→ 4：需要語意判斷的內容修正（修正 OCR 誤植錯字）。
 - 5/6 不是功能選項，是安全網，只要這次真的要呼叫 LLM 就一定帶上：
   5 限制 LLM 不得增刪內容、不得摘要節錄，6 避免它以內容敏感為由拒答。
 
-第 5 條原本掛在「進行LLM潤飾」那組，實測撞出真實的資料損失：只開前置
-處理時，第 2 條（移除頁首頁尾頁碼）這個刪除指令還在，唯一擋刪除的第 5
-條卻跟著開關一起消失，送出去的 prompt 等於「請刪掉雜訊」卻沒有任何
-「不准刪內容」的限制，LLM 會把 OCR 出來破碎的整行當雜訊清掉。它本質上
-是約束不是功能，改跟第 6 條同組、只要呼叫 LLM 就一定帶上。
+原本還有第 4 條「修正 OCR 誤植錯字」（前端的「進行LLM潤飾」開關），已經
+拿掉：那一條要模型自己判斷哪個字錯了、改成什麼，有改寫內容的風險，改了
+哪些地方使用者也看不出來。錯字留給 Stage 3 校對：校對只提出建議，由使用者
+逐條決定要不要套用。編號 4 刻意空著不重用，舊的討論與紀錄裡的「第 5 條」
+「第 6 條」才對得起來。
 
-兩個開關都關就完全不呼叫 LLM（只做決定性的 OpenCC 簡轉繁）。組出來的
+第 5 條原本掛在第 4 條那組，實測撞出真實的資料損失：只開前置處理時，
+第 2 條（移除頁首頁尾頁碼）這個刪除指令還在，唯一擋刪除的第 5 條卻跟著
+開關一起消失，送出去的 prompt 等於「請刪掉雜訊」卻沒有任何「不准刪內容」
+的限制，LLM 會把 OCR 出來破碎的整行當雜訊清掉。它本質上是約束不是功能，
+改跟第 6 條同組、只要呼叫 LLM 就一定帶上。
+
+前置處理關掉就完全不呼叫 LLM（只做決定性的 OpenCC 簡轉繁）。組出來的
 清單一律重新編號成連續的 1..N 再送給 LLM，不留給它看到跳號、以為自己
 漏掉東西的空間——這也是為什麼第 5 條的措辭不能用位置指稱，見 _ITEMS
 裡的註解。
@@ -61,11 +66,6 @@ _ITEMS: dict[int, str] = {
         "（開頭用「、結尾用」），缺漏的一邊依語意合理位置補上，方向用反的"
         "（例如該用「卻誤植成」，或反之）修正成正確方向"
     ),
-    4: (
-        "如果某個字明顯是 OCR 辨識錯誤造成的誤植（例如已經兜不成一個詞彙、"
-        "或讓上下文語意讀不通），在不改變原意的前提下修正成最合理、最符合上下文的字；"
-        "如果只是單純的用字選擇（例如口語與書面語的差異），不算錯字，不要更動"
-    ),
     # 這一條的措辭踩過兩次同一個坑，都是「用位置指稱其他項目」造成的：
     # 最早寫死「第 4 點」，發現清單會依開關重新編號、第 4 點不保證還是那個
     # 編號，改成「上一點」；但「上一點」還是位置指稱，只是從絕對變相對——
@@ -88,28 +88,19 @@ _ITEMS: dict[int, str] = {
 
 # 「進行前置處理」開關對應的項目
 PREPROCESS_ITEMS = frozenset({1, 2, 3})
-# 「進行LLM潤飾」開關對應的項目
-LLM_REFINE_ITEMS = frozenset({4})
 # 安全網，只要這次真的會呼叫 LLM 就帶上，本身不是可選功能——5 是「不得
 # 增刪內容/不得摘要」，6 是「不得以內容敏感為由拒答」，兩條都是約束而不是
-# 功能，不該跟著任何一個功能開關開關（5 為什麼從 LLM_REFINE_ITEMS 搬過來，
-# 見模組開頭的說明）
+# 功能，不該跟著功能開關開關（5 為什麼從原本第 4 條那組搬過來，見模組
+# 開頭的說明）
 SAFETY_ITEMS = frozenset({5, 6})
-# 六項全開（兩個開關都開）。呼叫端沒指定 items 時的預設，維持舊行為
-ALL_REFINE_ITEMS = PREPROCESS_ITEMS | LLM_REFINE_ITEMS | SAFETY_ITEMS
+# 前置處理開啟時送出的全部項目。呼叫端沒指定 items 時的預設
+ALL_REFINE_ITEMS = PREPROCESS_ITEMS | SAFETY_ITEMS
 
 
-def resolve_refine_items(enable_preprocess: bool, enable_llm_refine: bool) -> frozenset[int]:
-    """兩個開關 -> 這次要送給 LLM 的項目集合。回傳空集合代表這次根本不該
-    呼叫 LLM（呼叫端應該直接跳過，只留 OpenCC 的結果）。"""
-    items: set[int] = set()
-    if enable_preprocess:
-        items |= PREPROCESS_ITEMS
-    if enable_llm_refine:
-        items |= LLM_REFINE_ITEMS
-    if not items:
-        return frozenset()
-    return frozenset(items | SAFETY_ITEMS)
+def resolve_refine_items(enable_preprocess: bool) -> frozenset[int]:
+    """前置處理開關 -> 這次要送給 LLM 的項目集合。回傳空集合代表這次根本
+    不該呼叫 LLM（呼叫端應該直接跳過，只留 OpenCC 的結果）。"""
+    return ALL_REFINE_ITEMS if enable_preprocess else frozenset()
 
 
 def build_refine_system_prompt(items: frozenset[int]) -> str:

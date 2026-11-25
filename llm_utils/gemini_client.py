@@ -115,7 +115,7 @@ def refine_text(
     items: frozenset[int] | None = None,
 ) -> str:
     """items 是這次要套用的潤飾項目（見 llm_utils/prompts.py），由
-    orchestrator 依「進行前置處理」「進行LLM潤飾」兩個開關算出來。"""
+    orchestrator 依「進行前置處理」開關算出來。"""
     if not text.strip():
         # 沒有內容可以處理（例如整批都是空白頁）。內文單獨放在 user 訊息，
         # 空的會被 API 拒絕，也沒有理由為空白付一次呼叫

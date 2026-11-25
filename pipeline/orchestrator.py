@@ -1,7 +1,7 @@
 """
-提交者：串接 OpenCC 簡轉繁 -> LLM 潤飾（Gemini 或 Claude）-> OpenCC 校正
+提交者：串接 OpenCC 簡轉繁 -> LLM 前置處理（Gemini 或 Claude）-> OpenCC 校正
 -> 驗證 -> 組裝。OCR 不在這裡：一律在使用者本機做完（11+ 走
-zh-cn-to-tw-ocr-service，10.15 走 Apple Vision framework），backend 只收文字。
+zh-cn-to-tw-ocr-service，10.15 走 App 內嵌的 Tesseract），backend 只收文字。
 
 每一步都透過 job_manager 寫 log，前端可以輪詢看到即時進度。
 
@@ -231,7 +231,7 @@ def _refine_and_correct(
 
 
 def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settings: dict | None = None):
-    """OpenCC 簡轉繁 -> LLM 潤飾 -> OpenCC 校正 -> 驗證 -> 組裝，不含 OCR。"""
+    """OpenCC 簡轉繁 -> LLM 前置處理 -> OpenCC 校正 -> 驗證 -> 組裝，不含 OCR。"""
     settings = settings or {}
     model = settings.get("model") or config.GEMINI_MODEL
     batch_pages_setting = settings.get("batch_pages", config.REFINE_BATCH_PAGES)
@@ -239,33 +239,20 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
     user_email = settings.get("user_email")
     file_name = settings.get("file_name")
     project = settings.get("project")
-    # 兩個獨立開關，各自對應一組潤飾項目（見 llm_utils/prompts.py）：
-    # - enable_preprocess：移除頁碼與標頭、接合斷句、全形標點與引號（項目 1/2/3）
-    # - enable_llm_refine：修正 OCR 誤植錯字（項目 4/5），有改寫內容的風險
-    # 兩個都關就完全不呼叫 LLM，只保留決定性的 OpenCC 簡轉繁。
-    #
-    # enable_llm_refine 預設 True 維持舊行為；enable_preprocess 預設「跟
-    # enable_llm_refine 一樣」而不是寫死 True——舊版前端/桌面殼不會帶
-    # enable_preprocess，如果寫死 True，那些明確關掉潤飾的舊請求會突然
-    # 開始呼叫 LLM（使用者沒要求、還要付費），跟著 enable_llm_refine 走
-    # 才是兩種舊情況都完全不變。
-    enable_llm_refine = settings.get("enable_llm_refine", True)
-    enable_preprocess = settings.get("enable_preprocess", enable_llm_refine)
-    refine_items = resolve_refine_items(enable_preprocess, enable_llm_refine)
+    # enable_preprocess：移除頁碼與標頭、接合斷句、全形標點與引號（見
+    # llm_utils/prompts.py）。關掉就完全不呼叫 LLM，只保留決定性的 OpenCC
+    # 簡轉繁。舊版用戶端送的 enable_llm_refine（修正 OCR 錯字）已經不做了，
+    # 怎麼換算成這個開關見 app.py 的 _parse_refine_switches。
+    enable_preprocess = settings.get("enable_preprocess", True)
+    refine_items = resolve_refine_items(enable_preprocess)
 
     batch_size = _resolve_batch_size(batch_pages_setting, total_pages)
     if batch_pages_setting == config.WHOLE_BOOK_SENTINEL:
         job_manager.append_log(job_id, f"批次模式：整本丟（{total_pages} 頁當一批）")
     if not refine_items:
-        job_manager.append_log(job_id, "前置處理與 LLM 潤飾都已關閉，全程只做 OpenCC 簡轉繁")
+        job_manager.append_log(job_id, "前置處理已關閉，全程只做 OpenCC 簡轉繁")
     else:
-        job_manager.append_log(
-            job_id,
-            "本次處理項目："
-            + ("前置處理（移除頁碼與標頭、接合斷句、全形標點、整理引號）" if enable_preprocess else "")
-            + ("＋" if enable_preprocess and enable_llm_refine else "")
-            + ("LLM 潤飾（修正 OCR 誤植錯字）" if enable_llm_refine else ""),
-        )
+        job_manager.append_log(job_id, "本次處理項目：前置處理（移除頁碼與標頭、接合斷句、全形標點、整理引號）")
 
     refined_chunks = []
     batch_list = list(_batches(raw_pages, batch_size))
@@ -324,7 +311,7 @@ def run_refine_stage(job_id: str, raw_pages: list[str], total_pages: int, settin
             final_text = raw_batch_text
 
         # 不管這個批次走了哪條路徑，統一把殘留的單一換行（OCR 逐行
-        # 造成、或 LLM 潤飾後沒完全合併的斷行）正規化成段落分隔，
+        # 造成、或前置處理後沒完全合併的斷行）正規化成段落分隔，
         # 確保輸出（txt/docx）換行方式一致
         final_text = normalize_paragraph_breaks(final_text)
         refined_chunks.append(final_text)
