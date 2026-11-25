@@ -354,14 +354,20 @@ def auth_login():
     當長效憑證會讓工作階段每小時被打斷一次，這是這個 session token
     層存在的原因，細節說明見 auth_utils/sessions.py 開頭的註解。
 
-    body 需要 { "id_token": "<Google ID Token>" }；新版桌面殼另外帶
-    "nonce"（登入時產生的原值，比對方式見 auth_utils/auth.py 的
-    nonce_is_acceptable）。舊版用戶端不帶，照樣能登入。
+    body 需要 { "id_token": "<Google ID Token>", "nonce": "<登入時產生的原值>" }
+    （比對方式見 auth_utils/auth.py 的 nonce_is_acceptable）。舊版桌面殼沒有
+    原值，回 426 和一句請使用者更新的話：舊版會把 error 直接顯示出來，而它
+    只在開始跑 Stage 前才檢查版本，登入不了就看不到強制更新的提示。
     """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
-    email = auth.verify_google_id_token(body.get("id_token"), body.get("nonce"))
+    try:
+        email = auth.verify_google_id_token(body.get("id_token"), body.get("nonce"))
+    except auth.OutdatedClient:
+        return jsonify(
+            {"error": f"這個版本的 App 已經不能登入，請到 {auth.DOWNLOAD_PAGE_URL} 下載最新版"}
+        ), 426
     if email is None:
         return jsonify({"error": "Google 登入憑證無效或已過期，請重新登入"}), 401
     # session 與之後建立的工作紀錄一律存小寫，跟 users 表同一個規則（見

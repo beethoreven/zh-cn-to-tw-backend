@@ -115,8 +115,12 @@ check("new client token replayed without raw -> rejected", auth.verify_google_id
 check("new client token replayed with the token's own nonce as raw -> rejected",
       auth.verify_google_id_token(make_token(NEW), NEW), None)
 
-# Old clients during the transition
-check("legacy desktop (32 hex), no raw -> accepted", auth.verify_google_id_token(make_token(LEGACY), None), EMAIL)
+# Old clients: no longer accepted, but recognised so they can be told to update
+try:
+    auth.verify_google_id_token(make_token(LEGACY), None)
+    check("legacy desktop (32 hex), no raw -> OutdatedClient", "returned normally", "raised")
+except auth.OutdatedClient:
+    check("legacy desktop (32 hex), no raw -> OutdatedClient", "raised", "raised")
 check("legacy desktop with a raw nonce supplied -> rejected", auth.verify_google_id_token(make_token(LEGACY), RAW), None)
 check("no nonce claim, no raw -> rejected", auth.verify_google_id_token(make_token(), None), None)
 check("nonce claim explicitly null, no raw -> rejected", auth.verify_google_id_token(make_token(None), None), None)

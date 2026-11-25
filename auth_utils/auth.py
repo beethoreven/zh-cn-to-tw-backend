@@ -33,9 +33,16 @@ from configs import config
 _google_request = google_requests.Request()
 
 # 舊版桌面殼送進登入網址的 nonce:16 bytes 亂數的十六進位(32 個字元)。殼
-# 沒有留下這個值,登入時也不會送來。新版送的是原值的 SHA-256(base64url,
-# 43 個字元),兩種格式長度不同,分得出來。
+# 沒有留下這個值,登入時也不會送來,所以這種 token 一律不收。這裡留著格式
+# 只為了認出「這是舊版 App」,回一句請使用者更新,而不是看不懂的登入失敗:
+# 舊版只在開始跑 Stage 前才檢查版本,登入不了就永遠看不到強制更新的提示。
 _LEGACY_NONCE = re.compile(r"[0-9a-f]{32}")
+
+DOWNLOAD_PAGE_URL = "https://beethoreven.github.io/zh-cn-to-tw-web/"
+
+
+class OutdatedClient(Exception):
+    """舊版桌面殼的登入(沒有送 nonce 原值)。"""
 # 原值是殼產生的短字串(目前 32 個字元);長度上限只是擋掉明顯不是它的輸入
 _MAX_RAW_NONCE_LENGTH = 256
 
@@ -57,11 +64,9 @@ def nonce_is_acceptable(token_nonce, raw_nonce) -> bool:
     湊不出原值,不能拿它來換 session。如果直接比對 token 裡的 nonce,
     擋不住這種情況:token 裡的值誰都讀得到,照抄送來就能通過。
 
-    沒送原值時只放行 nonce 是舊版桌面殼格式的 token(見 _LEGACY_NONCE),
-    那些用戶端還沒改成這套做法。新版桌面殼的 token 一定帶著雜湊格式的
-    nonce,沒有原值就不放行。完全沒有 nonce 的 token 一律拒絕:每一版桌面殼
-    的登入網址都帶 nonce,沒有 nonce 代表這個 token 不是從桌面殼的登入流程
-    拿到的(以前只有已經停用的瀏覽器版會這樣)。
+    一定要有原值。舊版桌面殼沒有原值,它們拿到的 token 不收(見
+    _LEGACY_NONCE);完全沒有 nonce 的 token 也不收(以前只有已經停用的
+    瀏覽器版會這樣)。
     """
     if raw_nonce is not None:
         if not isinstance(raw_nonce, str) or not raw_nonce or len(raw_nonce) > _MAX_RAW_NONCE_LENGTH:
@@ -73,15 +78,16 @@ def nonce_is_acceptable(token_nonce, raw_nonce) -> bool:
         return hmac.compare_digest(
             token_nonce.encode("utf-8"), hashed_nonce(raw_nonce).encode("ascii")
         )
-    return isinstance(token_nonce, str) and _LEGACY_NONCE.fullmatch(token_nonce) is not None
+    return False
 
 
 def verify_google_id_token(token: str | None, raw_nonce=None):
     """
     驗證 Google ID Token,回傳驗證過的 email(字串);驗證失敗回傳 None。
 
-    raw_nonce 是登入請求一起送來的 nonce 原值(新版桌面殼才有),見
-    nonce_is_acceptable。
+    raw_nonce 是登入請求一起送來的 nonce 原值,見 nonce_is_acceptable。
+    舊版桌面殼的 token(Google 那邊驗證都過,只是沒有原值)拋 OutdatedClient,
+    讓呼叫端回一句請使用者更新。
     """
     if not token:
         return None
@@ -98,9 +104,13 @@ def verify_google_id_token(token: str | None, raw_nonce=None):
         # Google 帳號本身的 email 沒有經過驗證(理論上很少見),不能信任
         return None
 
-    if not nonce_is_acceptable(payload.get("nonce"), raw_nonce):
+    token_nonce = payload.get("nonce")
+    if not nonce_is_acceptable(token_nonce, raw_nonce):
         # 只記哪一種情況,不記 token 或 nonce 的內容
-        reason = "送來的原值對不上" if raw_nonce is not None else "沒送原值,token 也不是舊版用戶端的格式"
+        if raw_nonce is None and isinstance(token_nonce, str) and _LEGACY_NONCE.fullmatch(token_nonce):
+            print("[auth] 拒絕登入:舊版 App(沒送 nonce 原值)", flush=True)
+            raise OutdatedClient()
+        reason = "送來的原值對不上" if raw_nonce is not None else "沒送原值"
         print(f"[auth] 拒絕登入:nonce 檢查沒過({reason})", flush=True)
         return None
 
